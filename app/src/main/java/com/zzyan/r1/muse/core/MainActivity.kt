@@ -121,7 +121,8 @@ class MainActivity : Activity() {
     }
 
     private fun showSideChatList() {
-        screen.showSideChats(currentSession, sideChats.list(), ::switchSession) { switchSession(sideChats.create()) }
+        screen.showSideChats(currentSession, sideChats.list(), sideChats.unreadMain(),
+            ::switchSession) { switchSession(sideChats.create()) }
     }
 
     private fun switchSession(session: String?) {
@@ -132,6 +133,7 @@ class MainActivity : Activity() {
         if (session == null) screen.setUnread(sideChats.totalUnread())
         currentSession?.let { sideChats.save(it, history.toList()) }
         currentSession = session
+        if (session == null) sideChats.markMainRead()
         if (session != null) {
             sideChats.markRead(session)
             connection?.let { current ->
@@ -383,8 +385,9 @@ class MainActivity : Activity() {
                 if (connection !== current || recording) return@runOnUiThread
                 if (value.isNotBlank()) updateStatus(value.uppercase()) else updateStatus("READY")
             } },
-            { sessionId -> runOnUiThread {
-                sideChats.observe(sessionId, currentSession)
+            { sessionId, isMain -> runOnUiThread {
+                if (isMain) { if (currentSession != null) sideChats.observeMain() }
+                else sideChats.observe(sessionId, currentSession)
                 screen.setUnread(sideChats.totalUnread())
             } })
         connection = current
@@ -394,6 +397,7 @@ class MainActivity : Activity() {
                 if (connection !== current) return@launch
                 connected = true
                 updateStatus("READY")
+                current.mainSession()?.let { sideChats.promoteMain(it) }
                 if (hasConversation) renderConversation() else screen.showIdle()
                 fetchServerHistoryOnce(current)
             } catch (_: Exception) {
@@ -410,12 +414,29 @@ class MainActivity : Activity() {
             try {
                 val turns = withContext(Dispatchers.IO) { current.fetchRemoteHistory() }
                 if (connection !== current || currentSession != null || recording) return@launch
+                current.mainSession()?.let { sideChats.promoteMain(it); runOnUiThread { screen.setUnread(sideChats.totalUnread()) } }
                 val mapped = turns.map { (user, reply) ->
                     ConversationTurn(user.takeIf { it.isNotBlank() }, linkedMapOf("assistant" to reply))
                 }.ifEmpty { return@launch }
                 if (mapped.size > history.size) {
                     history.clear(); history.addAll(mapped); saveVisibleHistory()
                     renderConversation(); screen.jumpToLatest()
+                }
+                sideChats.list().forEach { chat ->
+                    try {
+                        val rows = withContext(Dispatchers.IO) { current.fetchChatHistory(chat.id, 5) }
+                        if (rows.isNotEmpty()) {
+                            val turns = rows.mapNotNull { (user, reply) ->
+                                if (user.isBlank() && reply.isBlank()) null
+                                else ConversationTurn(user.takeIf { it.isNotBlank() },
+                                    linkedMapOf("assistant" to reply))
+                            }
+                            if (sideChats.load(chat.id).isEmpty() && turns.isNotEmpty()) {
+                                sideChats.save(chat.id, turns)
+                                screen.setUnread(sideChats.totalUnread())
+                            }
+                        }
+                    } catch (_: Exception) { }
                 }
             } catch (_: Exception) { /* History 403s or timeouts keep the local display. */ }
         }

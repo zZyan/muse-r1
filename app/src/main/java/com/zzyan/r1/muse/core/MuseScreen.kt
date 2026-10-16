@@ -3,6 +3,8 @@ package com.zzyan.r1.muse.core
 import android.animation.ValueAnimator
 import com.zzyan.r1.muse.R
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.*
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -103,6 +105,7 @@ internal class MuseScreen(
         setOnClickListener { jumpToLatest() }
     }
     private val volume = VolumeOverlay(context)
+    private val quickSize = dp(160)
     private val bubble = BubbleButton(context, "Open side chats").apply {
         setOnClickListener { onSideChats() }
     }
@@ -166,12 +169,14 @@ internal class MuseScreen(
         latest.visibility = View.GONE
         hint.visibility = if (preferences.getBoolean("used_voice", false)) View.GONE else View.VISIBLE
         resizeCharacter(false)
+        refreshAvatarImage()
     }
 
     private fun layoutButtons() {
-        val pad = dp(8)
-        bubble.layout(pad, pad, pad + dp(44), pad + dp(44))
-        attach.layout(width - pad - dp(40), pad, width - pad, pad + dp(40))
+        val pad = dp(10)
+        bubble.layout(pad, pad, pad + quickSize, pad + quickSize)
+        attach.layout(width - pad - quickSize, height - pad - quickSize,
+            width - pad, height - pad)
     }
 
     fun setUnread(total: Int) { bubble.unread = total }
@@ -179,7 +184,7 @@ internal class MuseScreen(
     fun showAttachHint() = showNotice("Photo attached.\nSay something to send it with your voice note, or hold the background to discard.")
 
     fun showSideChats(
-        current: String?, chats: List<com.zzyan.r1.muse.core.SideChats.Chat>,
+        current: String?, chats: List<com.zzyan.r1.muse.core.SideChats.Chat>, mainUnread: Int,
         onPick: (String?) -> Unit, onNew: () -> Unit,
     ) {
         hideSideChats()
@@ -212,7 +217,7 @@ internal class MuseScreen(
             }
             list.addView(item, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         }
-        row(if (current == null) "Main chat  ●" else "Main chat", 0, current == null) { onPick(null) }
+        row("Main chat", mainUnread, current == null) { onPick(null) }
         chats.forEach { chat ->
             row(chat.name, chat.unread, chat.id == current) { onPick(chat.id) }
         }
@@ -379,8 +384,8 @@ internal class MuseScreen(
         clearHistory.measure(exact(dp(48)), exact(dp(48)))
         latest.measure(exact(dp(48)), exact(dp(48)))
         volume.measure(exact(w), exact(h))
-        bubble.measure(exact(dp(44)), exact(dp(44)))
-        attach.measure(exact(dp(40)), exact(dp(40)))
+        bubble.measure(exact(quickSize), exact(quickSize))
+        attach.measure(exact(quickSize), exact(quickSize))
         for (index in 0 until childCount) {
             val child = getChildAt(index)
             if (child.tag == "side_panel") child.measure(exact(w), exact(h))
@@ -403,7 +408,7 @@ internal class MuseScreen(
         status.layout(dp(26), contentTop - dp(24), width - dp(26), contentTop)
         scroll.layout(0, contentTop, width, height - dp(8))
         hint.layout(dp(10), height - dp(53), width - dp(10), height - dp(17))
-        clearHistory.layout(width - dp(62), dp(72), width - dp(14), dp(120))
+        clearHistory.layout(width - dp(62), dp(14), width - dp(14), dp(62))
         latest.layout((width - dp(48)) / 2, height - dp(68), (width + dp(48)) / 2, height - dp(20))
         volume.layout(0, 0, width, height)
         layoutButtons()
@@ -544,15 +549,16 @@ internal class MuseScreen(
         override fun onDraw(canvas: Canvas) {
             val cx = width / 2f
             val cy = height / 2f
+            val radius = width / 2f - dp(2)
             ink.style = Paint.Style.FILL
             ink.color = if (isPressed) Color.rgb(57, 43, 30)
                 else if (downArrow) Color.rgb(32, 29, 25) else this@MuseScreen.background
-            canvas.drawCircle(cx, cy, dp(22).toFloat(), ink)
+            canvas.drawCircle(cx, cy, radius, ink)
             ink.style = Paint.Style.STROKE
             ink.strokeWidth = dp(1).toFloat()
             ink.color = if (downArrow) orange else muted
-            if (downArrow) canvas.drawCircle(cx, cy, dp(21).toFloat(), ink)
-            ink.strokeWidth = dp(2).toFloat()
+            if (downArrow) canvas.drawCircle(cx, cy, radius - dp(1), ink)
+            ink.strokeWidth = dp(6).toFloat()
             ink.strokeCap = Paint.Cap.ROUND
             ink.strokeJoin = Paint.Join.ROUND
             if (downArrow) {
@@ -561,8 +567,9 @@ internal class MuseScreen(
                 canvas.drawLine(cx, cy + dp(8), cx + dp(6), cy + dp(2), ink)
             } else if (plus) {
                 ink.color = cream
-                canvas.drawLine(cx, cy - dp(9), cx, cy + dp(9), ink)
-                canvas.drawLine(cx - dp(9), cy, cx + dp(9), cy, ink)
+                val arm = width / 5f
+                canvas.drawLine(cx, cy - arm, cx, cy + arm, ink)
+                canvas.drawLine(cx - arm, cy, cx + arm, cy, ink)
             } else {
                 canvas.drawLine(cx - dp(8), cy - dp(7), cx + dp(8), cy - dp(7), ink)
                 canvas.drawLine(cx - dp(3), cy - dp(11), cx + dp(3), cy - dp(11), ink)
@@ -605,13 +612,13 @@ internal class MuseScreen(
             canvas.drawCircle(cx, cy, dp(21).toFloat(), ink)
             ink.style = Paint.Style.FILL
             ink.color = cream
-            ink.textSize = dp(18).toFloat()
+            ink.textSize = width / 3.5f
             ink.textAlign = Paint.Align.CENTER
             val fm = ink.fontMetrics
             canvas.drawText("💬", cx, cy - (fm.ascent + fm.descent) / 2, ink)
             if (unread > 0) {
                 ink.color = Color.rgb(52, 120, 246)
-                canvas.drawCircle(width - dp(6).toFloat(), dp(6).toFloat(), dp(5).toFloat(), ink)
+                canvas.drawCircle(width - dp(14).toFloat(), dp(14).toFloat(), dp(14).toFloat(), ink)
             }
         }
     }
@@ -643,6 +650,20 @@ internal class MuseScreen(
             }
         }
     }
+
+    private fun refreshAvatarImage() {
+        thread {
+            val file = RootAssets.syncAvatar(context)
+            if (file != null && file.lastModified() != lastAvatarStamp) {
+                val decoded = BitmapFactory.decodeFile(file.absolutePath)
+                if (decoded != null) { lastAvatarStamp = file.lastModified(); post { personaImage = decoded; avatar.invalidate() } }
+            }
+        }
+    }
+
+    @Volatile private var personaImage: Bitmap? = null
+    private var lastAvatarStamp = 0L
+    private fun thread(block: () -> Unit) = Thread(block).apply { start() }
 
     private inner class Character(context: Context) : View(context) {
         var compact = 0f
@@ -691,16 +712,29 @@ internal class MuseScreen(
             else canvas.drawCircle(center, center, radius, paint)
             paint.style = Paint.Style.FILL
             paint.alpha = 255
-            if (compact > 0f) {
-                val ring = Path().apply { addCircle(center, center, radius, Path.Direction.CW) }
-                canvas.save(); canvas.clipPath(ring)
+            val image = personaImage
+            val ringed = compact > 0f
+            paint.style = Paint.Style.FILL
+            if (image != null) {
+                // Cover the ring: scale so the shorter side fills, centered.
+                val s = maxOf(width.toFloat() / image.width, height.toFloat() / image.height)
+                canvas.save()
+                if (ringed) canvas.clipPath(Path().apply { addCircle(center, center, radius, Path.Direction.CW) })
+                canvas.translate(center, center); canvas.scale(s, s)
+                canvas.drawBitmap(image, -image.width / 2f, -image.height / 2f, paint)
+                canvas.restore()
+            } else {
+                if (ringed) {
+                    canvas.save()
+                    canvas.clipPath(Path().apply { addCircle(center, center, radius, Path.Direction.CW) })
+                }
+                paint.color = Color.WHITE
+                paint.textSize = width * .52f
+                paint.textAlign = Paint.Align.CENTER
+                val metrics = paint.fontMetrics
+                canvas.drawText(glyph, center, center - (metrics.ascent + metrics.descent) / 2, paint)
+                if (ringed) canvas.restore()
             }
-            paint.color = Color.WHITE
-            paint.textSize = width * .52f
-            paint.textAlign = Paint.Align.CENTER
-            val metrics = paint.fontMetrics
-            canvas.drawText(glyph, center, center - (metrics.ascent + metrics.descent) / 2, paint)
-            if (compact > 0f) canvas.restore()
             paint.color = orange
             if (phase == Phase.SPEAKING) {
                 repeat(3) { index ->

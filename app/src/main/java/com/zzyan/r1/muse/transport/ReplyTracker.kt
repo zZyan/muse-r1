@@ -8,7 +8,7 @@ internal class ReplyTracker(
     private val onUserTranscript: (String) -> Unit = {},
     private val onReply: (String, String, Boolean) -> Unit,
     private val onStatusEvent: (String) -> Unit = {},
-    private val onSessionActivity: (String) -> Unit = {},
+    private val onSessionActivity: (String, Boolean) -> Unit = { _, _ -> },
 ) {
     private var active = false
     private var acked = false
@@ -17,6 +17,8 @@ internal class ReplyTracker(
         private set
     var userMessageId: String? = null
         private set
+    var learnedMain: String? = null
+        private set
     private val userIds = mutableSetOf<String>()
     private val messageIds = mutableSetOf<String>()
     private val finished = mutableSetOf<String>()
@@ -24,13 +26,19 @@ internal class ReplyTracker(
     private val pending = mutableListOf<JSONObject>()
     private var userText: String? = null
 
+    internal fun learnMain(sessionId: String) { if (learnedMain == null) learnedMain = sessionId }
+
     fun begin(sessionId: String? = null) { active = true; acked = false; session = sessionId; userMessageId = null; userText = null; userIds.clear(); messageIds.clear(); finished.clear(); lengths.clear(); pending.clear() }
     fun cancel() { active = false; pending.clear() }
     fun ack(text: String) {
         val json = JSONObject(text)
         val payload = json.optJSONObject("result") ?: json
         userMessageId = payload.optString("message_id").takeIf { it.isNotBlank() }
-        if (session == null) session = payload.optString("session_id").takeIf { it.isNotBlank() }
+        if (session == null) {
+            payload.optString("session_id").takeIf { it.isNotBlank() }?.let {
+                session = it; if (learnedMain == null) learnedMain = it
+            }
+        }
         listOf("message_id", "reply_to_message_id").map { payload.optString(it) }.filter { it.isNotBlank() }.forEach(userIds::add)
         if (userIds.isEmpty()) throw ProtocolException("missing turn acknowledgement")
         acked = true
@@ -55,8 +63,11 @@ internal class ReplyTracker(
     /** Any event carrying a session_id that is not the active turn's session belongs to another chat. */
     private fun observeSession(json: JSONObject) {
         val payload = json.optJSONObject("payload") ?: return
+        val chatContext = payload.optJSONObject("chat_context")
+        val channel = chatContext?.optString("originating_channel") ?: ""
         val other = payload.optString("session_id").ifBlank { json.optString("session_id") }
-        if (other.isNotBlank() && other != session) onSessionActivity(other)
+            .ifBlank { chatContext?.optString("chat_id") ?: "" }
+        if (other.isNotBlank() && other != session) onSessionActivity(other, channel == "main" || other == learnedMain)
     }
     private fun deliver(json: JSONObject) {
         val event = json.optString("event")

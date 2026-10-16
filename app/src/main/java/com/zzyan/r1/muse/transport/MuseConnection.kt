@@ -23,7 +23,7 @@ class MuseConnection(
     private val onReply: (messageId: String, text: String, done: Boolean) -> Unit,
     private val onUserTranscript: (String) -> Unit = {},
     private val onStatusEvent: (String) -> Unit = {},
-    private val onSessionActivity: (String) -> Unit = {},
+    private val onSessionActivity: (String, Boolean) -> Unit = { _, _ -> },
 ) {
     private val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build()
@@ -108,13 +108,20 @@ class MuseConnection(
         }
     }
 
-    suspend fun fetchRemoteHistory(limit: Int = 20): List<Pair<String, String>> {
+    /** The main chat id learned from acks and history rows; null until known. */
+    fun mainSession(): String? = replies.learnedMain
+
+    suspend fun fetchRemoteHistory(limit: Int = 20): List<Pair<String, String>> = fetchChatHistory(null, limit)
+
+    /** Chat backlog; session_id scopes a side chat when the server honors the param. */
+    suspend fun fetchChatHistory(sessionId: String?, limit: Int): List<Pair<String, String>> {
         val completed = CompletableDeferred<Unit>()
         val id: Long
         val stream: Stream
         synchronized(lock) {
             check(!closed && ready.isCompleted && !ready.isCancelled)
-            id = start("GET", "/chat/history?limit=$limit", emptyList(), completed)
+            val scoped = sessionId?.let { "&session_id=$it" } ?: ""
+            id = start("GET", "/chat/history?limit=$limit$scoped", emptyList(), completed)
             stream = streams.getValue(id)
         }
         try {
@@ -122,6 +129,13 @@ class MuseConnection(
             val json = JSONObject(stream.body.toString(Charsets.UTF_8.name()))
             check(json.optBoolean("ok")) { "History unavailable" }
             val rows = json.getJSONObject("result").getJSONArray("chat_events")
+            if (replies.learnedMain == null) {
+                (0 until rows.length()).firstNotNullOfOrNull { i ->
+                    rows.getJSONObject(i).optJSONObject("chat_context")
+                        ?.takeIf { it.optString("originating_channel") == "main" }
+                        ?.optString("chat_id")?.takeIf { it.isNotBlank() }
+                }?.let { replies.learnMain(it) }
+            }
             val turns = mutableListOf<Pair<String, String>>()
             var user: String? = null
             (0 until rows.length()).forEach { index ->
@@ -338,13 +352,13 @@ class MuseConnection(
                 stream.status = value.status
                 append(stream, value.body)
                 if (value.status !in 200..299) { finish(frame.streamId, stream); return }
-                if (stream.path == "/chat/subscribe") { consumeLines(stream); stream.complete?.complete(Unit) }
+                if (stream.path == "/chat/subscribe") { consumeLines(stream, frame.streamId); stream.complete?.complete(Unit) }
                 if (value.end && subscriptionStreams.containsKey(frame.streamId)) finish(frame.streamId, stream)
                 else if (value.end && frame.streamId !in streams.keys) { /* body streams with end flag */ }
             }
             is BodyChunk -> {
                 append(stream, value.data)
-                if (stream.path == "/chat/subscribe") consumeLines(stream)
+                if (stream.path == "/chat/subscribe") consumeLines(stream, frame.streamId)
                 if (value.end) finish(frame.streamId, stream)
             }
             is Reset -> {
@@ -361,7 +375,7 @@ class MuseConnection(
         if (stream.body.size() + bytes.size > stream.limit) throw ProtocolException("response too large")
         stream.body.write(bytes)
     }
-    private fun consumeLines(stream: Stream) {
+    private fun consumeLines(stream: Stream, streamId: Long = 0L) {
         val all = stream.body.toByteArray()
         var start = 0
         for (i in all.indices) if (all[i] == 10.toByte()) {

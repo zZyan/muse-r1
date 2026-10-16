@@ -13,6 +13,7 @@ internal class SideChats(context: Context) {
     private val file = AtomicFile(File(context.noBackupFilesDir, "side-chats.json"))
     private val lock = Any()
     private val entries = LinkedHashMap<String, Entry>()
+    private var mainUnread = 0
 
     private class Entry(var name: String, var unread: Int, var history: List<ConversationTurn>)
 
@@ -37,7 +38,24 @@ internal class SideChats(context: Context) {
         entries.entries.reversed().map { Chat(it.key, it.value.name, it.value.unread) }
     }
 
-    fun totalUnread(): Int = synchronized(lock) { entries.values.sumOf { it.unread } }
+    /** A session discovered to be the main chat leaves the side list; its unread merges into main. */
+    fun promoteMain(sessionId: String) {
+        synchronized(lock) {
+            entries.remove(sessionId)?.let { mainUnread += it.unread; persistLocked() }
+        }
+    }
+
+    fun observeMain() {
+        synchronized(lock) { mainUnread++; persistLocked() }
+    }
+
+    fun markMainRead() {
+        synchronized(lock) { if (mainUnread != 0) { mainUnread = 0; persistLocked() } }
+    }
+
+    fun unreadMain(): Int = synchronized(lock) { mainUnread }
+
+    fun totalUnread(): Int = synchronized(lock) { mainUnread + entries.values.sumOf { it.unread } }
 
     fun create(): String {
         val id = UUID.randomUUID().toString()
@@ -61,7 +79,7 @@ internal class SideChats(context: Context) {
 
     private fun persistLocked() {
         try {
-            val json = JSONObject().put("sessions", JSONObject().apply {
+            val json = JSONObject().put("main_unread", mainUnread).put("sessions", JSONObject().apply {
                 entries.forEach { (id, entry) ->
                     put(id, JSONObject().put("name", entry.name).put("unread", entry.unread)
                         .put("history", encodeHistory(entry.history)))
@@ -83,6 +101,7 @@ internal class SideChats(context: Context) {
                 val entry = sessions.getJSONObject(id)
                 entries[id] = Entry(entry.optString("name").ifBlank { nameOf(entries.size + 1) },
                     entry.optInt("unread"), decodeHistory(entry.optString("history", "[]")))
+                mainUnread = root.optInt("main_unread")
             }
         } catch (_: Exception) { entries.clear() }
     }

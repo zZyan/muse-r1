@@ -74,7 +74,7 @@ class MuseConnection(
     }
 
     suspend fun sendVoice(wav: ByteArray, sessionId: String? = null, extraItems: List<JSONObject> = emptyList()): String? {
-        require(wav.size in 45..640044)
+        require(wav.size in 45..2000000)
         val item = JSONObject().put("type", "file").put("mime_type", "audio/wav")
             .put("filename", "voice_note.wav").put("data_base64", Base64.getEncoder().encodeToString(wav))
         // Mark the current end of history before upload, as the ESP32 client does.

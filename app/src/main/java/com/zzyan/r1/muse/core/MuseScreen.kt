@@ -436,7 +436,7 @@ internal class MuseScreen(
             }
             // User bubble (light slate, dark text) + photo thumbnails + label.
             if (turn.user != null || turn.attachments.isNotEmpty() || active) {
-                bubbleColumn.addView(label("You", muted, alignRight = true))
+                bubbleColumn.addView(label("You", Color.rgb(210, 205, 198), alignRight = true))
                 bubbleColumn.addView(bubble(Color.rgb(232, 228, 220), Color.BLACK, alignRight = true).apply {
                     gravity = Gravity.START
                     if (turn.attachments.isNotEmpty()) {
@@ -462,7 +462,7 @@ internal class MuseScreen(
             }
             // Muse bubble (peach tint, dark text) with the reply or the streaming indicator.
             val museText = turn.answer
-            bubbleColumn.addView(label("Muse", orange))
+            bubbleColumn.addView(label("Muse", Color.rgb(255, 160, 90)))
             bubbleColumn.addView(bubble(Color.rgb(255, 224, 204), Color.rgb(66, 32, 10), alignRight = false).apply {
                 if (active) {
                     addView(bubbleText(museText.ifBlank { if (indicator == Phase.LISTENING) "" else "…" },
@@ -491,8 +491,9 @@ internal class MuseScreen(
 
     private fun label(name: String, color: Int, alignRight: Boolean = false) = TextView(context).apply {
         text = name
-        textSize = 12f
+        textSize = 13f
         setTextColor(color)
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         setPadding(dp(4), dp(6), dp(4), dp(4))
         gravity = if (alignRight) Gravity.END else Gravity.START
         layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,

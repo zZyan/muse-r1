@@ -56,10 +56,6 @@ class MainActivity : Activity() {
     private val chatThreadImported = mutableSetOf<String>()
     private val sendQueue = ArrayDeque<Triple<ByteArray, String?, List<JSONObject>>>()
     private val textQueue = ArrayDeque<String>()
-    private var dictating = false
-    private var dictationFinal: String? = null
-    private var pendingVoiceWav: ByteArray? = null
-    private var dictationFinalForTurn: String? = null
     private val sideChats by lazy { SideChats(this) }
     private var currentSession: String? = null
     private var pendingItems = mutableListOf<JSONObject>()
@@ -459,22 +455,6 @@ class MainActivity : Activity() {
                 else sideChats.observe(sessionId, currentSession)
                 screen.setUnread(sideChats.totalUnread())
             } })
-        current.dictationListener = { line -> runOnUiThread {
-            android.util.Log.d("MuseDebug", "dictation line: " + line.take(120))
-            val text = parseDictationField(line) ?: return@runOnUiThread
-            if (recording) { // live partial: keep streaming, show interim in the composer
-                screen.composerInput.setText(text)
-                dictationFinalForTurn = null
-                return@runOnUiThread
-            }
-            // Released: this is the final transcript — confirm-before-send.
-            dictationFinalForTurn = text
-            pendingVoiceWav = null
-            transcriptPending = false
-            screen.composerInput.setText(text)
-            updateStatus("EDIT & SEND")
-            screen.showNotice("Transcript ready.\nEdit in the Message box and press send, or clear to discard.")
-        } }
         connection = current
         scope.launch {
             try {
@@ -548,18 +528,11 @@ class MainActivity : Activity() {
         }
         speech.stop()
         lateinit var capture: VoiceRecorder
-        dictating = connected && currentSession == null || connected // attempt streaming whenever connected
-        dictationFinal = null
-        if (dictating) { (connection ?: return).also { conn ->
-            scope.launch { try { withContext(Dispatchers.IO) { conn.beginDictation() } } catch (_: Exception) { } }
-        } }
         capture = VoiceRecorder({ runOnUiThread {
             if (recorder === capture) recordingLimitReached()
         } }, { runOnUiThread {
             if (recorder === capture) { finishRecording(false); updateStatus("MICROPHONE ERROR") }
-        } }, sampleRate = if (dictating) 24000 else 16000,
-            onChunk = if (dictating) ({ bytes -> scope.launch(Dispatchers.IO) {
-                try { (connection ?: return@launch).streamDictation(bytes) } catch (_: Exception) { } } }) else null)
+        } })
         recorder = capture
         try {
             capture.start(); recording = true
@@ -609,7 +582,7 @@ class MainActivity : Activity() {
         // Stop the microphone, but keep the capped audio cancellable until button release.
         cappedVoiceNote = recorder?.finish(); recorder = null
         updateStatus("RELEASE TO SEND")
-        screen.showNotice("20-second limit reached.\n\nRelease to send.\nTurn the wheel to discard and adjust volume.")
+        screen.showNotice("60-second limit reached.\n\nRelease to send.\nTurn the wheel to discard and adjust volume.")
     }
 
     private fun finishRecording(send: Boolean) {
@@ -619,7 +592,6 @@ class MainActivity : Activity() {
         val wav = cappedVoiceNote ?: recorder?.finish()
         cappedVoiceNote = null; recorder = null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        if (dictating) dictating = false
         if (!send || wav == null) {
             if (hasConversation) renderConversation() else screen.showIdle()
             updateStatus(if (send) "HOLD A LITTLE LONGER" else "READY")

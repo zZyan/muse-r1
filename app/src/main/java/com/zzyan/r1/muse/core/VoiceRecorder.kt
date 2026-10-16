@@ -50,9 +50,9 @@ internal class VoiceRecorder(private val onLimit: () -> Unit, private val onErro
                         }
                         continue
                     }
-                    val remaining = Wave.RATE * 2 * 20 - pcm.size()
+                    val remaining = Wave.RATE * 2 * 60 - pcm.size()
                     pcm.write(buffer, 0, minOf(read, remaining) and -2)
-                    if (pcm.size() >= Wave.RATE * 2 * 20) { onLimit(); break }
+                    if (pcm.size() >= Wave.RATE * 2 * 60) { onLimit(); break }
                 }
             } catch (_: Exception) { if (active.get()) onError() }
         }, "voice-capture").also { it.start() }

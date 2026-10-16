@@ -292,6 +292,11 @@ internal class MuseScreen(
         toggle.addView(chatsBtn)
         sheet.addView(toggle)
         val rows = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val rowsScroll = ScrollView(context).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            clipToPadding = true
+        }
 
         fun chatRow(label: String, unread: Int, isCurrent: Boolean, action: () -> Unit) {
             rows.addView(LinearLayout(context).apply {
@@ -337,7 +342,8 @@ internal class MuseScreen(
         fillChats()
         tabsBtn.setOnClickListener { fillTabs() }
         chatsBtn.setOnClickListener { fillChats() }
-        sheet.addView(rows, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        rowsScroll.addView(rows, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        sheet.addView(rowsScroll, LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
 
         // Footer: settings + title sync + new chat.
         val footer = LinearLayout(context).apply {

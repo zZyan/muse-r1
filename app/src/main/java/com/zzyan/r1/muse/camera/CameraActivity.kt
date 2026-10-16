@@ -151,6 +151,46 @@ class CameraActivity : ComponentActivity() {
 
     internal fun takePhoto() {
         val capture = imageCapture ?: return
+        if (forMuse) {
+            // In-memory capture: deterministic bytes, no CameraX file round-trip.
+            capture.takePicture(ContextCompat.getMainExecutor(this),
+                object : ImageCapture.OnImageCapturedCallback() {
+                    override fun onCaptureSuccess(image: androidx.camera.core.ImageProxy) {
+                        val buffer = image.planes[0].buffer
+                        val bytes = ByteArray(buffer.remaining())
+                        buffer.get(bytes)
+                        image.close()
+                        var final = bytes
+                        if (facingFront) {
+                            try {
+                                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                if (bmp != null) {
+                                    val m = android.graphics.Matrix().apply { postRotate(180f) }
+                                    val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                                    bmp.recycle()
+                                    val out = java.io.ByteArrayOutputStream()
+                                    rotated.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                                    rotated.recycle()
+                                    final = out.toByteArray()
+                                }
+                            } catch (_: Exception) { }
+                        }
+                        try {
+                            val file = noBackupFilesDir.resolve("pending-attach.jpg")
+                            file.writeBytes(final)
+                            val result = android.content.Intent()
+                                .putExtra("photo_path", file.absolutePath)
+                            setResult(RESULT_OK, result)
+                        } catch (_: Exception) { }
+                        finish()
+                    }
+
+                    override fun onError(exception: ImageCaptureException) {
+                        finish()
+                    }
+                })
+            return
+        }
         val name = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(java.util.Date())
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "MUSE_$name.jpg")
@@ -188,14 +228,6 @@ class CameraActivity : ComponentActivity() {
                         } catch (e: Exception) {
                             label = "SAVED(unflipped): ${e.message}"
                         }
-                    }
-                    if (forMuse) {
-                        val result = android.content.Intent().apply {
-                            putExtra("photo_uri", outputFileResults.savedUri?.toString().orEmpty())
-                        }
-                        setResult(RESULT_OK, result)
-                        finish()
-                        return
                     }
                     status.text = label
                     Toast.makeText(this@CameraActivity, "Photo saved", Toast.LENGTH_SHORT).show()

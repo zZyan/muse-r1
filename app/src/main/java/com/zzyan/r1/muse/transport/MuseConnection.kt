@@ -113,6 +113,30 @@ class MuseConnection(
 
     suspend fun fetchRemoteHistory(limit: Int = 20): List<Pair<String, String>> = fetchChatHistory(null, limit)
 
+    /** Probe for an undocumented conversation-list endpoint; log statuses only. */
+    suspend fun probeThreadsEndpoints() {
+        val paths = listOf("/chat/threads", "/chat/threads?vm_id=", "/threads", "/chat/conversations",
+            "/conversations", "/chat/sessions", "/chat/list", "/chat/history?include_archived=true")
+        paths.forEach { path ->
+            try {
+                val completed = CompletableDeferred<Unit>()
+                val id: Long
+                val stream: Stream
+                synchronized(lock) {
+                    check(!closed && ready.isCompleted && !ready.isCancelled)
+                    id = start("GET", path, emptyList(), completed)
+                    stream = streams.getValue(id)
+                }
+                try {
+                    withTimeout(4_000) { completed.await() }
+                    android.util.Log.d("MuseWire", "PROBE $path -> ${stream.status} bytes=${stream.body.size()}")
+                } catch (_: Exception) {
+                    android.util.Log.d("MuseWire", "PROBE $path -> error")
+                }
+            } catch (_: Exception) { }
+        }
+    }
+
     /** Chat backlog; session_id scopes a side chat when the server honors the param. */
     suspend fun fetchChatHistory(sessionId: String?, limit: Int): List<Pair<String, String>> {
         val completed = CompletableDeferred<Unit>()

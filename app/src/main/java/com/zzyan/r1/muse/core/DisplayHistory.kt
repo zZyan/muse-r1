@@ -12,13 +12,14 @@ import java.io.File
 internal data class ConversationTurn(
     var user: String? = null,
     val replies: LinkedHashMap<String, String> = linkedMapOf(),
+    val attachments: MutableList<String> = mutableListOf(),
 ) {
     val answer get() = replies.values.joinToString("\n\n")
 }
 
 internal fun encodeHistory(turns: List<ConversationTurn>): String = JSONArray().apply {
     turns.forEach { turn ->
-        put(JSONObject().put("user", turn.user ?: JSONObject.NULL).put("replies", JSONArray().apply {
+        put(JSONObject().put("user", turn.user ?: JSONObject.NULL).put("attachments", JSONArray(turn.attachments)).put("replies", JSONArray().apply {
             turn.replies.forEach { (id, text) -> put(JSONObject().put("id", id).put("text", text)) }
         }))
     }
@@ -33,6 +34,10 @@ internal fun decodeHistory(text: String): List<ConversationTurn> {
             for (replyIndex in 0 until replies.length()) {
                 val reply = replies.getJSONObject(replyIndex)
                 put(reply.getString("id"), reply.getString("text"))
+            }
+        }, mutableListOf<String>().apply {
+            row.optJSONArray("attachments")?.let { arr ->
+                for (i in 0 until arr.length()) add(arr.optString(i))
             }
         })
     }

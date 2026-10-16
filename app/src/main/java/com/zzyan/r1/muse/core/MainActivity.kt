@@ -53,6 +53,8 @@ class MainActivity : Activity() {
     private val hasConversation get() = history.isNotEmpty()
     private val historyStore get() = (application as MuseApp).displayHistory
     private var serverHistoryFetched = false
+    private val chatThreadImported = mutableSetOf<String>()
+    private val sendQueue = ArrayDeque<Triple<ByteArray, String?, List<JSONObject>>>()
     private val sideChats by lazy { SideChats(this) }
     private var currentSession: String? = null
     private var pendingItems = mutableListOf<JSONObject>()
@@ -183,31 +185,46 @@ class MainActivity : Activity() {
         when (requestCode) {
             7101, 7102 -> {
                 val photo = requestCode == 7101
-                val raw = if (photo) data?.getStringExtra("photo_uri") else data?.data?.toString()
-                val uri = raw?.takeIf { it.isNotBlank() }?.let { android.net.Uri.parse(it) } ?: return
-                var bytes = contentResolver.openInputStream(uri)?.use { stream -> stream.readBytes() } ?: return
-                if (bytes.size > 2_000_000) {
-                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    if (bitmap != null) {
-                        var scale = 0.7f
-                        while (scale >= 0.25f) {
-                            val scaled = Bitmap.createScaledBitmap(bitmap,
-                                (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
-                            val buffer = java.io.ByteArrayOutputStream()
-                            scaled.compress(Bitmap.CompressFormat.JPEG, 85, buffer)
-                            if (buffer.size() <= 2_000_000) { bytes = buffer.toByteArray(); break }
-                            buffer.reset(); scale -= 0.15f
+                val bytes: ByteArray
+                val mime: String
+                val name: String
+                if (photo) {
+                    val path = data?.getStringExtra("photo_path")?.takeIf { it.isNotBlank() }
+                        ?: data?.getStringExtra("photo_uri")?.takeIf { it.isNotBlank() } ?: return
+                    val source = java.io.File(path)
+                    if (!source.exists()) return
+                    var loaded = source.readBytes()
+                    if (loaded.size > 2_000_000) {
+                        val bitmap = BitmapFactory.decodeByteArray(loaded, 0, loaded.size)
+                        if (bitmap != null) {
+                            var scale = 0.7f
+                            while (scale >= 0.25f) {
+                                val scaled = Bitmap.createScaledBitmap(bitmap,
+                                    (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+                                val buffer = java.io.ByteArrayOutputStream()
+                                scaled.compress(Bitmap.CompressFormat.JPEG, 85, buffer)
+                                if (buffer.size() <= 2_000_000) { loaded = buffer.toByteArray(); break }
+                                buffer.reset(); scale -= 0.15f
+                            }
+                            bitmap.recycle()
                         }
-                        bitmap.recycle()
                     }
+                    if (loaded.size > 2_000_000) {
+                        screen.showNotice("Attachment stays over the 2 MB Muse limit. Pick a smaller file.")
+                        return
+                    }
+                    source.delete()
+                    bytes = loaded; mime = "image/jpeg"; name = System.currentTimeMillis().toString() + ".jpg"
+                } else {
+                    val uri = data?.data ?: return
+                    bytes = try { contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                    } catch (e: Exception) { screen.showNotice("Couldn't read that file."); return } ?: return
+                    if (bytes.size > 2_000_000) {
+                        screen.showNotice("Attachment is over the 2 MB Muse limit. Pick a smaller file.")
+                        return
+                    }
+                    mime = contentResolver.getType(uri) ?: "application/octet-stream"; name = "attachment"
                 }
-                if (bytes.size > 2_000_000) {
-                    screen.showNotice("Attachment stays over the 2 MB Muse limit. Pick a smaller file.")
-                    return
-                }
-                val name = if (photo) System.currentTimeMillis().toString() + ".jpg" else "attachment"
-                val mime = if (photo) "image/jpeg" else (contentResolver.getType(uri)
-                    ?: "application/octet-stream")
                 addToPendingItems(bytes, mime, name)
             }
         }
@@ -310,6 +327,7 @@ class MainActivity : Activity() {
         if (done) {
             sending = false; turnTimeout?.cancel(); updateStatus("REPLY RECEIVED")
             speech.speak(current.replies.getValue(id))
+            drainSendQueue()
         }
     }
 
@@ -417,6 +435,7 @@ class MainActivity : Activity() {
         if (serverHistoryFetched || currentSession != null) return
         serverHistoryFetched = true
         scope.launch {
+            try { withContext(Dispatchers.IO) { current.probeThreadsEndpoints() } } catch (_: Exception) { }
             try {
                 val turns = withContext(Dispatchers.IO) { current.fetchRemoteHistory() }
                 if (connection !== current || currentSession != null || recording) return@launch
@@ -428,21 +447,28 @@ class MainActivity : Activity() {
                     history.clear(); history.addAll(mapped); saveVisibleHistory()
                     renderConversation(); screen.jumpToLatest()
                 }
-                sideChats.list().forEach { chat ->
-                    try {
-                        val rows = withContext(Dispatchers.IO) { current.fetchChatHistory(chat.id, 5) }
-                        if (rows.isNotEmpty()) {
-                            val turns = rows.mapNotNull { (user, reply) ->
-                                if (user.isBlank() && reply.isBlank()) null
-                                else ConversationTurn(user.takeIf { it.isNotBlank() },
-                                    linkedMapOf("assistant" to reply))
-                            }
-                            if (sideChats.load(chat.id).isEmpty() && turns.isNotEmpty()) {
-                                sideChats.save(chat.id, turns)
-                                screen.setUnread(sideChats.totalUnread())
-                            }
-                        }
-                    } catch (_: Exception) { }
+                // Pull the official app's thread inventory (root) and backfill every one of them.
+                val inventory = withContext(Dispatchers.IO) { AuraBridge.syncThreadIds(this@MainActivity) }
+                val known = sideChats.list().map { it.id }.toMutableSet()
+                inventory.forEach { thread ->
+                    val fresh = chatThreadImported.add(thread.sessionId) && thread.sessionId !in known
+                    val backlog = try {
+                        withContext(Dispatchers.IO) { current.fetchChatHistory(thread.sessionId, 10) }
+                    } catch (_: Exception) { emptyList() }
+                    if (backlog.isNotEmpty() && sideChats.load(thread.sessionId).isEmpty()) {
+                        val title = backlog.firstNotNullOfOrNull { (user, _) ->
+                            user.takeIf { it.isNotBlank() }?.take(26)?.trim()
+                        } ?: "Side chat"
+                        sideChats.rename(thread.sessionId, title)
+                        sideChats.save(thread.sessionId, backlog.mapNotNull { (user, reply) ->
+                            if (user.isBlank() && reply.isBlank()) null
+                            else ConversationTurn(user.takeIf { it.isNotBlank() }, linkedMapOf("assistant" to reply))
+                        })
+                        if (currentSession != null && thread.sessionId != currentSession) sideChats.observe(thread.sessionId, currentSession)
+                    } else if (fresh && backlog.isEmpty()) {
+                        sideChats.rename(thread.sessionId, "Side chat")
+                    }
+                    screen.setUnread(sideChats.totalUnread())
                 }
             } catch (_: Exception) { /* History 403s or timeouts keep the local display. */ }
         }
@@ -450,8 +476,8 @@ class MainActivity : Activity() {
 
     private fun beginRecording() {
         if (!historyLoaded || recording || controls?.isShowing == true || clearDialog?.isShowing == true) return
-        if (!connected || sending) {
-            if (!connected) screen.showNotice(if (store.credentials() == null) "Pair this r1 with Muse on your phone first."
+        if (!connected) {
+            screen.showNotice(if (store.credentials() == null) "Pair this r1 with Muse on your phone first."
                 else "Not connected.\nHold the empty background to reconnect.")
             return
         }
@@ -487,7 +513,6 @@ class MainActivity : Activity() {
                 sideButtonNotice("Close the dialog, then hold the side button to talk.")
             !historyLoaded -> sideButtonNotice("Display history is still loading. Try holding again in a moment.")
             recording -> sideButtonNotice("A recording is already in progress.")
-            sending -> sideButtonNotice("Muse is still preparing your reply. Try holding again after it arrives.")
             else -> { beginRecording(); sideButtonRecording = recording; return recording }
         }
         return false
@@ -530,8 +555,23 @@ class MainActivity : Activity() {
             updateStatus(if (send) "HOLD A LITTLE LONGER" else "READY")
             return
         }
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        val queued = sending
         screen.markVoiceUsed()
+        if (queued) {
+            synchronized(pendingItems) {
+                sendQueue.add(Triple(wav, currentSession, pendingItems.toList()))
+                pendingItems.clear(); pendingItemsLabel = ""
+            }
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            updateStatus("QUEUED")
+            screen.showNotice("Queued — sends when Muse finishes this reply.")
+            return
+        }
+        dispatchVoice(wav)
+    }
+
+    private fun dispatchVoice(wav: ByteArray) {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         startVoiceTurn()
         val current = connection
         val thisTurn = turn
@@ -553,13 +593,40 @@ class MainActivity : Activity() {
         turnTimeout = scope.launch { delay(300_000); if (sending) { sending = false; disconnect(); updateStatus("REPLY TIMED OUT") } }
     }
 
+    private fun drainSendQueue() {
+        val next = synchronized(sendQueue) { sendQueue.removeFirstOrNull() } ?: return
+        scope.launch { delay(1_200) }
+        scope.launch {
+            next.third.let { synchronized(pendingItems) { pendingItems.clear(); pendingItems.addAll(it) } }
+            dispatchVoice(next.first)
+        }
+    }
+
     private fun startVoiceTurn() {
-        activeTurn = ConversationTurn().also { history.add(it) }
+        val turn = ConversationTurn().also { history.add(it) }
+        activeTurn = turn
+        // Persist image attachments so the conversation renders thumbnails.
+        val items = synchronized(pendingItems) { pendingItems.toList() }
+        items.forEachIndexed { index, item ->
+            if (item.optString("mime_type").startsWith("image/")) {
+                try {
+                    val bytes = java.util.Base64.getDecoder().decode(item.optString("data_base64"))
+                    val file = java.io.File(noBackupFilesDir(), "att-${turnIndex()}-$index.jpg")
+                    file.writeBytes(bytes)
+                    turn.attachments.add(file.absolutePath)
+                } catch (_: Exception) { }
+            }
+        }
         sending = true; transcriptPending = true
         saveVisibleHistory()
         screen.jumpToLatest()
         renderConversation(); updateStatus("SENDING VOICE NOTE")
     }
+
+    private fun noBackupFilesDir() = applicationContext.noBackupFilesDir
+
+    private var turnCounter = 0
+    private fun turnIndex(): Int { turnCounter += 1; return turnCounter }
 
     private fun fetchTranscript(current: MuseConnection, userId: String?, thisTurn: Long) {
         transcriptFetch = scope.launch {

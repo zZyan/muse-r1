@@ -8,6 +8,7 @@ import android.graphics.BitmapFactory
 import android.graphics.*
 import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.style.ImageSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
 import android.text.style.ReplacementSpan
@@ -294,7 +295,23 @@ internal class MuseScreen(
         }
         history.forEachIndexed { index, turn ->
             val active = index == history.lastIndex && indicator != null
-            section("You", turn.user?.takeIf { it.isNotBlank() } ?: if (active) "\uFFFC" else "Transcript unavailable", muted)
+            val body = turn.user?.takeIf { it.isNotBlank() } ?: if (active) "\uFFFC" else "Transcript unavailable"
+            val hasAttachments = turn.attachments.isNotEmpty()
+            val label = when {
+                body != "Transcript unavailable" && hasAttachments -> body + " 📎"
+                hasAttachments && body == "Transcript unavailable" -> "Photo attached \uDFBC"
+                else -> body
+            }
+            section("You", label, muted)
+            if (hasAttachments) {
+                turn.attachments.forEach { path ->
+                    val thumb = thumbnailFor(path) ?: return@forEach
+                    val spanStart = transcript.length
+                    transcript.append("\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0")
+                    transcript.setSpan(ImageSpan(thumb, ImageSpan.ALIGN_BOTTOM),
+                        spanStart.minus(0).coerceAtLeast(0), transcript.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+            }
             if (active) voiceIndicator?.let { transcript.setSpan(it, transcript.length - 1, transcript.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
             if (!(active && indicator == Phase.LISTENING)) section("Muse", turn.answer.ifBlank { "…" }, orange)
         }
@@ -414,6 +431,19 @@ internal class MuseScreen(
         volume.layout(0, 0, width, height)
         layoutButtons()
         updateLatestButton()
+    }
+
+    private val thumbnails = mutableMapOf<String, Bitmap>()
+    private fun thumbnailFor(path: String): Bitmap? {
+        thumbnails[path]?.let { return it }
+        val file = java.io.File(path)
+        if (!file.exists()) return null
+        val raw = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+        val size = dp(56)
+        val scaled = Bitmap.createScaledBitmap(raw, size, size, true)
+        if (scaled !== raw) raw.recycle()
+        thumbnails[path] = scaled
+        return scaled
     }
 
     private fun conversationTop(w: Float, h: Float) = (h * .045f + min(w * .32f, h * .25f) + dp(27)).toInt()

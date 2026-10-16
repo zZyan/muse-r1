@@ -66,6 +66,13 @@ internal class SideChats(context: Context) {
         return id
     }
 
+    fun rename(sessionId: String, name: String) {
+        synchronized(lock) {
+            val entry = entries.getOrPut(sessionId) { Entry(nameOf(entries.size + 1), 0, emptyList()) }
+            if (entry.name != name) { entry.name = name; persistLocked() }
+        }
+    }
+
     fun load(sessionId: String): List<ConversationTurn> = synchronized(lock) { entries[sessionId]?.history ?: emptyList() }
 
     fun save(sessionId: String, turns: List<ConversationTurn>) {

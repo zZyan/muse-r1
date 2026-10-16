@@ -23,6 +23,7 @@ import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -74,19 +75,23 @@ internal class MuseScreen(
         }
     }.apply {
         textSize = 16f
-        setTextColor(cream)
-        typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+        setTextColor(Color.WHITE)
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         includeFontPadding = false
         setLineSpacing(dp(3).toFloat(), 1f)
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+    }
+    private val bubbleColumn = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(8), dp(4), dp(8), dp(4))
     }
     private val scroll: ScrollView = ScrollView(context).apply {
         isFillViewport = false
         isVerticalScrollBarEnabled = false
         overScrollMode = View.OVER_SCROLL_NEVER
         clipToPadding = false
-        setPadding(dp(26), 0, dp(26), dp(24))
-        addView(message, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        setPadding(dp(18), 0, dp(18), dp(24))
+        addView(bubbleColumn, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         visibility = View.GONE
         setOnScrollChangeListener { _, _, _, _, _ ->
             if (!updatingTranscript && !applyingScroll) followingLatest = atBottom()
@@ -233,7 +238,7 @@ internal class MuseScreen(
 
     private fun layoutButtons() {
         val pad = dp(8)
-        bubble.layout(pad, pad, pad + dp(56), pad + dp(56))
+        bubble.layout(pad, pad, pad + dp(72), pad + dp(72))
         composer.layout(0, height - dp(62), width, height)
         composerAttach.layout(dp(14), dp(9), dp(58), dp(53))
         composerVoice.layout(width - dp(58), dp(9), width - dp(14), dp(53))
@@ -414,52 +419,103 @@ internal class MuseScreen(
 
     private fun showTranscript(history: List<ConversationTurn>, indicator: Phase?) {
         voiceIndicator = indicator?.let { VoiceIndicator(it) }
-        val transcript = SpannableStringBuilder()
-        fun section(name: String, body: String, color: Int) {
-            if (transcript.isNotEmpty()) transcript.append("\n\n")
-            val start = transcript.length
-            transcript.append(name)
-            transcript.setSpan(ForegroundColorSpan(color), start, transcript.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            transcript.setSpan(RelativeSizeSpan(.64f), start, transcript.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            transcript.append("\n").append(body)
-        }
+        bubbleColumn.removeAllViews()
+        val activeIndex = if (indicator != null) history.lastIndex else -1
         history.forEachIndexed { index, turn ->
-            val active = index == history.lastIndex && indicator != null
-            val body = turn.user?.takeIf { it.isNotBlank() } ?: if (active) "\uFFFC" else "Transcript unavailable"
-            val hasAttachments = turn.attachments.isNotEmpty()
-            val label = when {
-                body != "Transcript unavailable" && hasAttachments -> body + " 📎"
-                hasAttachments && body == "Transcript unavailable" -> "Photo attached \uDFBC"
-                else -> body
+            val active = index == activeIndex
+            // User bubble (light slate, dark text) + photo thumbnails + label.
+            if (turn.user != null || turn.attachments.isNotEmpty() || active) {
+                bubbleColumn.addView(label("You", muted, alignRight = true))
+                bubbleColumn.addView(bubble(Color.rgb(232, 228, 220), Color.BLACK, alignRight = true).apply {
+                    gravity = Gravity.START
+                    if (turn.attachments.isNotEmpty()) {
+                        val thumbRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                        turn.attachments.forEach { path ->
+                            val thumb = thumbnailFor(path)
+                            if (thumb != null) thumbRow.addView(ImageView(context).apply {
+                                setImageBitmap(thumb)
+                                layoutParams = LinearLayout.LayoutParams(dp(64), dp(64)).apply { marginEnd = dp(6) }
+                            })
+                        }
+                        addView(thumbRow)
+                    }
+                    if (turn.user?.isNotBlank() == true || !active) {
+                        val body = turn.user?.takeIf { it.isNotBlank() } ?: (if (active) "\uFFFC" else "Transcript unavailable")
+                        val paperclip = if (turn.attachments.isNotEmpty()) "  📎" else ""
+                        addView(bubbleText(body + paperclip, active && voiceIndicator != null))
+                    }
+                    if (turn.attachments.isNotEmpty() && turn.user?.isNotBlank() != true) {
+                        addView(bubbleText(if (active) "\uFFFC" else "Photo attached", false))
+                    }
+                })
             }
-            section("You", label, muted)
-            if (hasAttachments) {
-                turn.attachments.forEach { path ->
-                    val thumb = thumbnailFor(path) ?: return@forEach
-                    val spanStart = transcript.length
-                    transcript.append("\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0\u00A0")
-                    transcript.setSpan(ImageSpan(thumb, ImageSpan.ALIGN_BOTTOM),
-                        spanStart.minus(0).coerceAtLeast(0), transcript.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            // Muse bubble (peach tint, dark text) with the reply or the streaming indicator.
+            val museText = turn.answer
+            bubbleColumn.addView(label("Muse", orange))
+            bubbleColumn.addView(bubble(Color.rgb(255, 224, 204), Color.rgb(66, 32, 10), alignRight = false).apply {
+                if (active) {
+                    addView(bubbleText(museText.ifBlank { if (indicator == Phase.LISTENING) "" else "…" },
+                        indicator != null && indicator != Phase.LISTENING))
+                } else {
+                    addView(bubbleText(museText.ifBlank { "…" }, false))
                 }
-            }
-            if (active) voiceIndicator?.let { transcript.setSpan(it, transcript.length - 1, transcript.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE) }
-            if (!(active && indicator == Phase.LISTENING)) section("Muse", turn.answer.ifBlank { "…" }, orange)
+            })
         }
-        message.contentDescription = if (indicator == null) null else transcript.toString().replace("\uFFFC",
-            if (indicator == Phase.LISTENING) "Recording. Release to send." else "Transcribing voice note.")
+        if (activeIndex >= 0 && indicator != null) {
+            // Active-turn indicators ride inside the last bubbles (listening sparkle in the user side).
+            voiceIndicator?.let { _ -> }
+        }
+        message.contentDescription = null
         updatingTranscript = true
         val position = scroll.scrollY
-        message.text = transcript
-        showConversationArea()
         scroll.post {
             applyingScroll = true
-            if (followingLatest) scroll.scrollTo(0, (message.height + scroll.paddingBottom - scroll.height).coerceAtLeast(0))
+            if (followingLatest) scroll.scrollTo(0, (bubbleColumn.height - scroll.height).coerceAtLeast(0))
             else scroll.scrollTo(0, position)
             applyingScroll = false
             updatingTranscript = false
             updateLatestButton()
         }
     }
+
+    private fun label(name: String, color: Int, alignRight: Boolean = false) = TextView(context).apply {
+        text = name
+        textSize = 12f
+        setTextColor(color)
+        setPadding(dp(4), dp(6), dp(4), dp(4))
+        gravity = if (alignRight) Gravity.END else Gravity.START
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT).apply { gravity = if (alignRight) Gravity.END else Gravity.START }
+    }
+
+    private fun bubbleText(value: String, animated: Boolean): TextView = TextView(context).apply {
+        text = value
+        textSize = 16f
+        maxWidth = dp(330)
+        setTextColor(Color.BLACK)
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        setLineSpacing(dp(2).toFloat(), 1f)
+        includeFontPadding = false
+        setPadding(dp(12), dp(8), dp(12), dp(10))
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+    }
+
+    private fun bubble(bg: Int, textColor: Int, alignRight: Boolean): LinearLayout =
+        LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(bg)
+                cornerRadius = dp(16).toFloat()
+            }
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.gravity = if (alignRight) Gravity.END else Gravity.START
+            lp.setMargins(0, dp(2), 0, dp(6))
+            layoutParams = lp
+            setPadding(dp(6), dp(4), dp(6), dp(4))
+        }
+
+
 
     fun setState(value: String) {
         status.text = value
@@ -526,13 +582,13 @@ internal class MuseScreen(
         fun exact(value: Int) = MeasureSpec.makeMeasureSpec(value, MeasureSpec.EXACTLY)
         avatar.measure(exact(size), exact(size))
         val contentTop = conversationTop(w.toFloat(), h.toFloat())
-        scroll.measure(exact(w), exact(h - contentTop - dp(8)))
+        scroll.measure(exact(w), exact(h - contentTop - dp(66)))
         status.measure(exact(w - dp(52)), exact(dp(24)))
         hint.measure(exact(w - dp(20)), exact(dp(36)))
         clearHistory.measure(exact(dp(48)), exact(dp(48)))
         latest.measure(exact(dp(48)), exact(dp(48)))
         volume.measure(exact(w), exact(h))
-        bubble.measure(exact(dp(56)), exact(dp(56)))
+        bubble.measure(exact(dp(72)), exact(dp(72)))
         composer.measure(exact(w), exact(dp(62)))
         composerAttach.measure(exact(dp(44)), exact(dp(44)))
         composerInput.measure(exact(w - dp(116)), exact(dp(44)))
@@ -557,7 +613,7 @@ internal class MuseScreen(
         avatar.layout((width - size) / 2, avatarTop, (width + size) / 2, avatarTop + size)
         val contentTop = conversationTop(w, h)
         status.layout(dp(26), contentTop - dp(24), width - dp(26), contentTop)
-        scroll.layout(0, contentTop, width, height - dp(8))
+        scroll.layout(0, contentTop, width, height - dp(66))
         hint.layout(dp(10), height - dp(53), width - dp(10), height - dp(17))
         clearHistory.layout(width - dp(62), dp(14), width - dp(14), dp(62))
         latest.layout((width - dp(48)) / 2, height - dp(68), (width + dp(48)) / 2, height - dp(20))
@@ -819,7 +875,7 @@ internal class MuseScreen(
             canvas.drawText("💬", cx, cy - (fm.ascent + fm.descent) / 2, ink)
             if (unread > 0) {
                 ink.color = Color.rgb(52, 120, 246)
-                canvas.drawCircle(width - dp(14).toFloat(), dp(14).toFloat(), dp(14).toFloat(), ink)
+                canvas.drawCircle(width - dp(9).toFloat(), dp(9).toFloat(), dp(6).toFloat(), ink)
             }
         }
     }

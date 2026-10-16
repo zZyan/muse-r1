@@ -35,8 +35,10 @@ class MuseConnection(
     private var handshake: NoiseHandshake? = null
     private var noise: NoiseCipherPair? = null
     private val subscriptionStreams = mutableMapOf<Long, String?>() // stream id → session (null = main)
+    private val dictationStreams = mutableSetOf<Long>()
     private var closed = false
     private val replies = ReplyTracker(onUserTranscript, onReply, onStatusEvent, onSessionActivity)
+    var dictationListener: ((String) -> Unit)? = null
     private var transcriptAfterSeq = 0L
 
     private class Vm(val token: String, val id: String)
@@ -118,7 +120,60 @@ class MuseConnection(
 
     suspend fun fetchRemoteHistory(limit: Int = 20): List<Pair<String, String>> = fetchChatHistory(null, limit)
 
-    /** Probe for an undocumented conversation-list endpoint; log statuses only. */
+    /** Open the streaming-dictation stream (POST, chunked PCM upload, NDJSON transcripts). */
+    fun beginDictation() {
+        synchronized(lock) {
+            check(!closed && ready.isCompleted && !ready.isCancelled)
+            val id = start("POST", "/api/voice/dictation",
+                listOf(Header("Content-Type", "audio/pcm;rate=24000")), null, end = false)
+            dictationStreams.add(id)
+        }
+    }
+
+    fun streamDictation(chunk: ByteArray) {
+        synchronized(lock) {
+            val sid = dictationStreams.firstOrNull() ?: return
+            if (closed) return
+            sendFrame(ServiceFrame(sid, BodyChunk(chunk, false)))
+        }
+    }
+
+    fun endDictation() {
+        synchronized(lock) {
+            val sid = dictationStreams.firstOrNull() ?: return
+            if (!closed) sendFrame(ServiceFrame(sid, BodyChunk(ByteArray(0), true)))
+            dictationStreams.remove(sid)
+            streams.remove(sid)
+        }
+    }
+
+    /** Probe the dictation endpoint (upstream phone-app feature) for existence + auth shape. */
+    suspend fun probeDictation() {
+        listOf(
+            "POST" to "/api/voice/dictation",
+            "POST" to "/voice/dictation",
+            "GET" to "/api/voice/dictation",
+        ).forEach { (method, path) ->
+            try {
+                val completed = CompletableDeferred<Unit>()
+                val id: Long
+                val stream: Stream
+                synchronized(lock) {
+                    check(!closed && ready.isCompleted && !ready.isCancelled)
+                    id = start(method, path, listOf(Header("Content-Type", "application/octet-stream")), completed)
+                    stream = streams.getValue(id)
+                }
+                try {
+                    withTimeout(4_000) { completed.await() }
+                    android.util.Log.d("MuseWire", "DICT $method $path -> ${stream.status} bytes=${stream.body.size()}")
+                } catch (_: Exception) {
+                    android.util.Log.d("MuseWire", "DICT $method $path -> error")
+                }
+            } catch (_: Exception) { }
+        }
+    }
+
+    /** Chat backlog; session_id scopes a side chat when the server honors the param. */
     suspend fun probeThreadsEndpoints() {
         val paths = listOf("/chat/threads", "/chat/threads?vm_id=", "/threads", "/chat/conversations",
             "/conversations", "/chat/sessions", "/chat/list", "/chat/history?include_archived=true")
@@ -375,6 +430,10 @@ class MuseConnection(
     }
 
     private fun handle(frame: ServiceFrame) {
+        if (frame.streamId in dictationStreams && frame.streamId !in streams.keys) {
+            // Response frames for the dictation stream can arrive before/without our map hit — keep a phantom.
+            streams[frame.streamId] = Stream("/api/voice/dictation", null, 1024 * 1024)
+        }
         val stream = streams[frame.streamId] ?: return
         when (val value = frame.value) {
             is ApplicationResponse -> {
@@ -388,6 +447,7 @@ class MuseConnection(
             is BodyChunk -> {
                 append(stream, value.data)
                 if (stream.path == "/chat/subscribe") consumeLines(stream, frame.streamId)
+                if (stream.path == "/api/voice/dictation") consumeDictation(stream)
                 if (value.end) finish(frame.streamId, stream)
             }
             is Reset -> {
@@ -404,6 +464,17 @@ class MuseConnection(
         if (stream.body.size() + bytes.size > stream.limit) throw ProtocolException("response too large")
         stream.body.write(bytes)
     }
+    private fun consumeDictation(stream: Stream) {
+        val all = stream.body.toByteArray()
+        var start = 0
+        for (i in all.indices) if (all[i] == 10.toByte()) {
+            val line = all.copyOfRange(start, i).toString(Charsets.UTF_8)
+            if (line.isNotBlank()) dictationListener?.invoke(line)
+            start = i + 1
+        }
+        if (start > 0) { stream.body.reset(); stream.body.write(all, start, all.size - start) }
+    }
+
     private fun consumeLines(stream: Stream, streamId: Long = 0L) {
         val all = stream.body.toByteArray()
         var start = 0

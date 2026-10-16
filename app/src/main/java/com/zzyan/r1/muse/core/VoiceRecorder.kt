@@ -20,7 +20,8 @@ internal object Wave {
     }
 }
 
-internal class VoiceRecorder(private val onLimit: () -> Unit, private val onError: () -> Unit) {
+internal class VoiceRecorder(private val onLimit: () -> Unit, private val onError: () -> Unit,
+    private val sampleRate: Int = Wave.RATE, private val onChunk: ((ByteArray) -> Unit)? = null) {
     private val active = AtomicBoolean(false)
     private var recorder: AudioRecord? = null
     private var thread: Thread? = null
@@ -28,8 +29,8 @@ internal class VoiceRecorder(private val onLimit: () -> Unit, private val onErro
 
     fun start() {
         check(!active.get())
-        val size = maxOf(4096, AudioRecord.getMinBufferSize(Wave.RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT))
-        val audio = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, Wave.RATE,
+        val size = maxOf(4096, AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT))
+        val audio = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, sampleRate,
             AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, size)
         if (audio.state != AudioRecord.STATE_INITIALIZED) { audio.release(); error("Microphone unavailable") }
         pcm.reset(); recorder = audio
@@ -40,6 +41,15 @@ internal class VoiceRecorder(private val onLimit: () -> Unit, private val onErro
                 while (active.get()) {
                     val read = audio.read(buffer, 0, buffer.size)
                     if (read <= 0) { if (active.get()) onError(); break }
+                    if (onChunk != null) {
+                        // Streaming dictation: forward raw PCM at capture rate, cap 20 s.
+                        if (pcm.size() < sampleRate * 2 * 20) {
+                            pcm.write(buffer, 0, read and -2)
+                            onChunk.invoke(buffer.copyOf(read and -2))
+                            if (pcm.size() >= sampleRate * 2 * 20) { onLimit(); break }
+                        }
+                        continue
+                    }
                     val remaining = Wave.RATE * 2 * 20 - pcm.size()
                     pcm.write(buffer, 0, minOf(read, remaining) and -2)
                     if (pcm.size() >= Wave.RATE * 2 * 20) { onLimit(); break }

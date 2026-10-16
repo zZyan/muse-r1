@@ -58,11 +58,16 @@ class MuseConnection(
         } catch (error: Exception) { close(); throw IllegalStateException("Muse connection failed", error) }
     }
 
-    suspend fun sendText(text: String, sessionId: String? = null) {
+    suspend fun sendText(text: String, sessionId: String? = null, extraItems: List<JSONObject> = emptyList()) {
         require(text.isNotBlank())
         val body = JSONObject().put("message", text).put("output_modality", "text")
             .put("device_id", credentials.deviceId)
         sessionId?.let { body.put("session_id", it) }
+        if (extraItems.isNotEmpty()) {
+            val items = JSONArray()
+            extraItems.forEach { items.put(it) }
+            body.put("items", items)
+        }
         sendChat(body.toString().toByteArray(), sessionId)
     }
 

@@ -2,9 +2,10 @@ package com.zzyan.r1.muse.core
 
 import android.animation.ValueAnimator
 import com.zzyan.r1.muse.R
+import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.graphics.drawable.ColorDrawable
 import android.graphics.*
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -17,6 +18,7 @@ import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
@@ -130,12 +132,21 @@ internal class MuseScreen(
         inputType = android.text.InputType.TYPE_CLASS_TEXT
         imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
         setSingleLine(true)
+        isFocusableInTouchMode = true
         setOnEditorActionListener { _, action, _ ->
             if (action == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
                 val value = text?.toString()?.trim().orEmpty()
+                (context as? Activity)?.window?.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+                (context as? Activity)?.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
                 if (value.isNotEmpty()) { onSendText(value); setText("") }
                 true
             } else false
+        }
+        // Immersive fullscreen blocks the IME; drop the flag while typing.
+        setOnClickListener {
+            (context as? Activity)?.window?.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+            imm?.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
         }
     }
     private val composerAttach = IconButton(context, "Add attachment", downArrow = false, plus = true).apply {
@@ -235,48 +246,119 @@ internal class MuseScreen(
 
     fun showSideChats(
         current: String?, chats: List<com.zzyan.r1.muse.core.SideChats.Chat>, mainUnread: Int,
-        onPick: (String?) -> Unit, onNew: () -> Unit,
+        onPick: (String?) -> Unit, onNew: () -> Unit, onSettings: () -> Unit,
+        onSyncTitles: () -> Unit = {},
     ) {
         hideSideChats()
         val overlay = FrameLayout(context).apply {
-            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            setBackgroundColor(Color.argb(130, 0, 0, 0))
             setOnClickListener { hideSideChats() }
         }
-        val sheet = FrameLayout(context).apply {
-            setBackgroundColor(Color.rgb(22, 23, 22))
+        val sheet = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(17, 17, 17))
             setOnClickListener { }
-            val pad = dp(16)
-            setPadding(pad, pad, pad, pad)
+            setPadding(dp(16), dp(20), dp(16), dp(16))
         }
-        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
-        fun row(label: String, unread: Int, isCurrent: Boolean, action: () -> Unit) {
-            val item = LinearLayout(context).apply {
+        // Header: persona name, like the official drawer.
+        sheet.addView(text(personaName, 19f, cream).apply {
+            setPadding(0, 0, 0, dp(14))
+        })
+        // Toggle: TABS <-> SIDE CHATS.
+        val toggle = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, dp(8))
+        }
+        val tabsBtn = TextView(context).apply {
+            text = "TABS"
+            textSize = 15f
+            setTextColor(muted)
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+            background = ColorDrawable(Color.rgb(30, 30, 30))
+        }
+        val chatsBtn = TextView(context).apply {
+            text = "SIDE CHATS"
+            textSize = 15f
+            setTextColor(cream)
+            setPadding(dp(18), dp(14), dp(18), dp(14))
+        }
+        toggle.addView(tabsBtn)
+        toggle.addView(chatsBtn)
+        sheet.addView(toggle)
+        val rows = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+
+        fun chatRow(label: String, unread: Int, isCurrent: Boolean, action: () -> Unit) {
+            rows.addView(LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
-                setPadding(dp(10), dp(12), dp(10), dp(12))
+                setPadding(dp(6), dp(16), dp(6), dp(16))
                 gravity = Gravity.CENTER_VERTICAL
-                if (isCurrent) setBackgroundColor(Color.rgb(46, 47, 46))
+                if (isCurrent) setBackgroundColor(Color.rgb(40, 40, 40))
                 setOnClickListener { hideSideChats(); action() }
                 if (unread > 0) addView(View(context).apply {
-                    layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply { marginEnd = dp(10) }
+                    layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply { marginEnd = dp(12) }
                     setBackgroundColor(Color.rgb(52, 120, 246))
                 })
-                addView(text(label, 16f, if (isCurrent) orange else cream).apply {
+                addView(text(label, 16f, cream).apply {
                     layoutParams = LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
                 })
-                if (unread > 0) addView(text("$unread unread", 11f, muted))
+                if (unread > 0) addView(text("$unread", 13f, muted))
+            })
+        }
+
+        var showingChats = true
+        fun fillChats() {
+            rows.removeAllViews()
+            showingChats = true
+            tabsBtn.setTextColor(muted); chatsBtn.setTextColor(cream)
+            chatRow("Main chat", mainUnread, current == null) { onPick(null) }
+            chats.forEach { chat ->
+                chatRow(chat.name, chat.unread, chat.id == current) { onPick(chat.id) }
             }
-            list.addView(item, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            rows.addView(text("+ New side chat", 16f, muted).apply {
+                setPadding(dp(6), dp(16), dp(6), dp(16))
+                setOnClickListener { hideSideChats(); onNew() }
+            })
         }
-        row("Main chat", mainUnread, current == null) { onPick(null) }
-        chats.forEach { chat ->
-            row(chat.name, chat.unread, chat.id == current) { onPick(chat.id) }
+        fun fillTabs() {
+            rows.removeAllViews()
+            showingChats = false
+            tabsBtn.setTextColor(cream); chatsBtn.setTextColor(muted)
+            chatRow("Main chat", 0, current == null) { onPick(null) }
+            listOf("Feed", "Ideas", "Goals", "Library").forEach { page ->
+                chatRow(page, 0, false) { hideSideChats() }
+            }
         }
-        row("+ New side chat", 0, false) { onNew() }
-        sheet.addView(list, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
-        overlay.addView(sheet, LayoutParams(width / 7 * 6, LayoutParams.WRAP_CONTENT,
-            Gravity.CENTER_VERTICAL or Gravity.START))
+        fillChats()
+        tabsBtn.setOnClickListener { fillTabs() }
+        chatsBtn.setOnClickListener { fillChats() }
+        sheet.addView(rows, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+
+        // Footer: settings + title sync + new chat.
+        val footer = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, dp(14), 0, dp(4))
+        }
+        footer.addView(text("Settings", 14f, muted).apply {
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            setOnClickListener { hideSideChats(); onSettings() }
+        })
+        footer.addView(text("Sync titles", 14f, muted).apply {
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            setOnClickListener { hideSideChats(); onSyncTitles() }
+        })
+        footer.addView(text("New side chat", 14f, muted).apply {
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            setOnClickListener { hideSideChats(); onNew() }
+        })
+        sheet.addView(footer)
+        overlay.addView(sheet, LayoutParams(width * 7 / 8, LayoutParams.MATCH_PARENT, Gravity.END))
         overlay.tag = "side_panel"
         addView(overlay)
+        val wSpec = android.view.View.MeasureSpec.makeMeasureSpec(width, android.view.View.MeasureSpec.EXACTLY)
+        val hSpec = android.view.View.MeasureSpec.makeMeasureSpec(height, android.view.View.MeasureSpec.EXACTLY)
+        overlay.measure(wSpec, hSpec)
+        overlay.layout(0, 0, width, height)
     }
 
     fun hideSideChats() {

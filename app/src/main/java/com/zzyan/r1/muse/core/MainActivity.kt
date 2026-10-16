@@ -55,6 +55,7 @@ class MainActivity : Activity() {
     private var serverHistoryFetched = false
     private val chatThreadImported = mutableSetOf<String>()
     private val sendQueue = ArrayDeque<Triple<ByteArray, String?, List<JSONObject>>>()
+    private val textQueue = ArrayDeque<String>()
     private val sideChats by lazy { SideChats(this) }
     private var currentSession: String? = null
     private var pendingItems = mutableListOf<JSONObject>()
@@ -83,7 +84,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         volumeControlStream = AudioManager.STREAM_MUSIC
         screen = MuseScreen(this, ::beginRecording, ::finishRecording, ::showControls, ::confirmClearHistory,
-            ::showSideChatList, ::showAttachMenu)
+            ::showSideChatList, ::showAttachMenu, ::sendTextMessage)
         status = screen.status
         message = screen.message
         setContentView(screen)
@@ -124,7 +125,47 @@ class MainActivity : Activity() {
 
     private fun showSideChatList() {
         screen.showSideChats(currentSession, sideChats.list(), sideChats.unreadMain(),
-            ::switchSession) { switchSession(sideChats.create()) }
+            ::switchSession, { switchSession(sideChats.create()) }, ::openAndroidSettings)
+    }
+
+    private fun openAndroidSettings() {
+        startActivity(Intent(Settings.ACTION_SETTINGS))
+    }
+
+    /** Text composer send: non-blocking like voice; rides the same queue. */
+    private fun sendTextMessage(raw: String) {
+        val text = raw.trim()
+        if (text.isEmpty()) return
+        if (!connected || connection == null) {
+            screen.showNotice(if (store.credentials() == null) "Pair this r1 with Muse on your phone first."
+                else "Not connected.\nHold the empty background to reconnect.")
+            return
+        }
+        if (sending || recording) {
+            synchronized(textQueue) { textQueue.add(text) }
+            screen.showNotice("Queued — sends when Muse finishes this reply.")
+            return
+        }
+        dispatchText(text)
+    }
+
+    private fun dispatchText(text: String) {
+        startTurn(user = text)
+        val current = connection
+        val thisTurn = turn
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val items = synchronized(pendingItems) { pendingItems.toList() }
+                    checkNotNull(current).sendText(text, currentSession, items)
+                }
+                synchronized(pendingItems) { pendingItems.clear(); pendingItemsLabel = "" }
+            } catch (_: Exception) {
+                if (connection === current) { sending = false; window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); updateStatus("SEND FAILED"); screen.showNotice("Couldn't send.") }
+            }
+        }
+        turnTimeout?.cancel()
+        turnTimeout = scope.launch { delay(300_000); if (sending) { sending = false; disconnect(); updateStatus("REPLY TIMED OUT") } }
     }
 
     private fun switchSession(session: String?) {
@@ -602,8 +643,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun startVoiceTurn() {
-        val turn = ConversationTurn().also { history.add(it) }
+    private fun startVoiceTurn() = startTurn(user = null)
+
+    private fun startTurn(user: String?) {
+        val turn = ConversationTurn(user = user).also { history.add(it) }
         activeTurn = turn
         // Persist image attachments so the conversation renders thumbnails.
         val items = synchronized(pendingItems) { pendingItems.toList() }

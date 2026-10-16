@@ -241,6 +241,12 @@ class MainActivity : Activity() {
         if (hasFocus) enterFullscreen()
     }
 
+    /** Assistant/launcher re-deliveries (long-hold power while Muse is already foreground) must be a no-op. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Absorb silently: no recreate, no re-entry animation handling, no state change.
+    }
+
     private fun updateStatus(value: String, force: Boolean = false) {
         screen.setState(if (force) value else when {
             currentSession != null && value in setOf("READY", "REPLY RECEIVED") -> "SIDE CHAT ACTIVE"

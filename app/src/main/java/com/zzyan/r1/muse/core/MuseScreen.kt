@@ -175,7 +175,8 @@ internal class MuseScreen(
     private fun layoutButtons() {
         val pad = dp(10)
         bubble.layout(pad, pad, pad + quickSize, pad + quickSize)
-        attach.layout(width - pad - quickSize, height - pad - quickSize,
+        val half = quickSize / 2
+        attach.layout(width - pad - half, height - pad - half,
             width - pad, height - pad)
     }
 
@@ -385,7 +386,7 @@ internal class MuseScreen(
         latest.measure(exact(dp(48)), exact(dp(48)))
         volume.measure(exact(w), exact(h))
         bubble.measure(exact(quickSize), exact(quickSize))
-        attach.measure(exact(quickSize), exact(quickSize))
+        attach.measure(exact(quickSize / 2), exact(quickSize / 2))
         for (index in 0 until childCount) {
             val child = getChildAt(index)
             if (child.tag == "side_panel") child.measure(exact(w), exact(h))
@@ -652,17 +653,43 @@ internal class MuseScreen(
     }
 
     private fun refreshAvatarImage() {
+        val f = java.io.File(context.noBackupFilesDir, "avatar.webp")
+        val file = when {
+            f.exists() && f.length() > 0 && f.canRead() -> f
+            else -> RootAssets.syncAvatar(context) ?: return
+        }
         thread {
-            val file = RootAssets.syncAvatar(context)
-            if (file != null && file.lastModified() != lastAvatarStamp) {
-                val decoded = BitmapFactory.decodeFile(file.absolutePath)
-                if (decoded != null) { lastAvatarStamp = file.lastModified(); post { personaImage = decoded; avatar.invalidate() } }
+            val decoded = BitmapFactory.decodeFile(file.absolutePath) ?: return@thread
+            val trimmed = trimWhiteMargins(decoded)
+            if (trimmed !== decoded) decoded.recycle()
+            if (file.lastModified() != lastAvatarStamp) {
+                lastAvatarStamp = file.lastModified()
+                post { personaImage = trimmed; avatar.invalidate() }
             }
         }
     }
 
     @Volatile private var personaImage: Bitmap? = null
     private var lastAvatarStamp = 0L
+    /** Persona avatars ship on a white canvas; crop to the drawn subject so the face fills the ring. */
+    private fun trimWhiteMargins(source: Bitmap): Bitmap {
+        val w = source.width; val h = source.height
+        if (w * h > 4_000_000) return source
+        val pixels = IntArray(w * h)
+        source.getPixels(pixels, 0, w, 0, 0, w, h)
+        fun bright(i: Int) = ((pixels[i] shr 16 and 0xFF) + (pixels[i] shr 8 and 0xFF) + (pixels[i] and 0xFF)) / 3 > 245
+        var top = 0; while (top < h && (0 until w).all { bright(it + top * w) }) top++
+        var bottom = h; while (bottom > top + 1 && (0 until w).all { bright(it + (bottom - 1) * w) }) bottom--
+        var left = 0; while (left < w && (0 until h).all { bright(left + it * w) }) left++
+        var right = w; while (right > left + 1 && (0 until h).all { bright((right - 1) + it * w) }) right--
+        if (top == 0 && left == 0 && bottom == h && right == w) return source
+        val pad = 4
+        val x0 = (left - pad).coerceAtLeast(0); val y0 = (top - pad).coerceAtLeast(0)
+        val x1 = (right + pad).coerceAtMost(w); val y1 = (bottom + pad).coerceAtMost(h)
+        if (x1 - x0 < 24 || y1 - y0 < 24) return source
+        return Bitmap.createBitmap(source, x0, y0, x1 - x0, y1 - y0)
+    }
+
     private fun thread(block: () -> Unit) = Thread(block).apply { start() }
 
     private inner class Character(context: Context) : View(context) {

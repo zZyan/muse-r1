@@ -118,6 +118,7 @@ internal class MuseScreen(
         setOnClickListener { jumpToLatest() }
     }
     private val volume = VolumeOverlay(context)
+    private val recordOverlay = RecordOverlay(context)
     private val bubble = BubbleButton(context, "Open side panel").apply {
         setOnClickListener { onSideChats() }
     }
@@ -203,9 +204,9 @@ internal class MuseScreen(
         addView(clearHistory)
         addView(latest)
         addView(bubble)
-        composer.addView(composerAttach, LinearLayout.LayoutParams(dp(44), dp(44)))
-        composer.addView(composerInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        composer.addView(composerVoice, LinearLayout.LayoutParams(dp(44), dp(44)))
+        composer.addView(composerAttach, LinearLayout.LayoutParams(dp(60), dp(60)))
+        composer.addView(composerInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(dp(-8), 0, dp(-8), 0) })
+        composer.addView(composerVoice, LinearLayout.LayoutParams(dp(60), dp(60)))
         addView(composer, LayoutParams(LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
         addView(volume)
         showIdle()
@@ -239,10 +240,10 @@ internal class MuseScreen(
     private fun layoutButtons() {
         val pad = dp(8)
         bubble.layout(pad, pad, pad + dp(72), pad + dp(72))
-        composer.layout(0, height - dp(62), width, height)
-        composerAttach.layout(dp(14), dp(9), dp(58), dp(53))
-        composerVoice.layout(width - dp(58), dp(9), width - dp(14), dp(53))
-        composerInput.layout(dp(64), dp(9), width - dp(64), dp(53))
+        composer.layout(0, height - dp(66), width, height)
+        composerAttach.layout(dp(23), dp(3), dp(83), dp(63))
+        composerVoice.layout(width - dp(80), dp(3), width - dp(20), dp(63))
+        composerInput.layout(dp(75), dp(1), width - dp(83), dp(65))
     }
 
     fun setUnread(total: Int) { bubble.unread = total }
@@ -419,10 +420,14 @@ internal class MuseScreen(
 
     private fun showTranscript(history: List<ConversationTurn>, indicator: Phase?) {
         voiceIndicator = indicator?.let { VoiceIndicator(it) }
+        if (indicator == Phase.LISTENING) recordOverlay.show() else recordOverlay.hide()
         bubbleColumn.removeAllViews()
         val activeIndex = if (indicator != null) history.lastIndex else -1
         history.forEachIndexed { index, turn ->
             val active = index == activeIndex
+            if (!active && turn.user == null && turn.attachments.isEmpty() && turn.replies.isEmpty()) {
+                return@forEachIndexed // orphan empty turn: nothing to show (prevents stray "…")
+            }
             // User bubble (light slate, dark text) + photo thumbnails + label.
             if (turn.user != null || turn.attachments.isNotEmpty() || active) {
                 bubbleColumn.addView(label("You", muted, alignRight = true))
@@ -434,7 +439,7 @@ internal class MuseScreen(
                             val thumb = thumbnailFor(path)
                             if (thumb != null) thumbRow.addView(ImageView(context).apply {
                                 setImageBitmap(thumb)
-                                layoutParams = LinearLayout.LayoutParams(dp(64), dp(64)).apply { marginEnd = dp(6) }
+                                layoutParams = LinearLayout.LayoutParams(dp(96), dp(96)).apply { marginEnd = dp(8) }
                             })
                         }
                         addView(thumbRow)
@@ -583,16 +588,17 @@ internal class MuseScreen(
         avatar.measure(exact(size), exact(size))
         val contentTop = conversationTop(w.toFloat(), h.toFloat())
         scroll.measure(exact(w), exact(h - contentTop - dp(66)))
+        recordOverlay.measure(exact(w), exact(h))
         status.measure(exact(w - dp(52)), exact(dp(24)))
         hint.measure(exact(w - dp(20)), exact(dp(36)))
         clearHistory.measure(exact(dp(48)), exact(dp(48)))
         latest.measure(exact(dp(48)), exact(dp(48)))
         volume.measure(exact(w), exact(h))
         bubble.measure(exact(dp(72)), exact(dp(72)))
-        composer.measure(exact(w), exact(dp(62)))
-        composerAttach.measure(exact(dp(44)), exact(dp(44)))
-        composerInput.measure(exact(w - dp(116)), exact(dp(44)))
-        composerVoice.measure(exact(dp(44)), exact(dp(44)))
+        composer.measure(exact(w), exact(dp(66)))
+        composerAttach.measure(exact(dp(60)), exact(dp(60)))
+        composerInput.measure(exact(w - dp(163)), exact(dp(60)))
+        composerVoice.measure(exact(dp(60)), exact(dp(60)))
         for (index in 0 until childCount) {
             val child = getChildAt(index)
             if (child.tag == "side_panel") child.measure(exact(w), exact(h))
@@ -618,6 +624,7 @@ internal class MuseScreen(
         clearHistory.layout(width - dp(62), dp(14), width - dp(14), dp(62))
         latest.layout((width - dp(48)) / 2, height - dp(68), (width + dp(48)) / 2, height - dp(20))
         volume.layout(0, 0, width, height)
+        recordOverlay.layout(0, 0, width, height)
         layoutButtons()
         updateLatestButton()
     }
@@ -798,6 +805,63 @@ internal class MuseScreen(
                 canvas.drawLine(cx - dp(2), cy, cx - dp(2), cy + dp(6), ink)
                 canvas.drawLine(cx + dp(2), cy, cx + dp(2), cy + dp(6), ink)
             }
+        }
+    }
+
+    /** Recording feedback: red pulsing dot + live waveform bars, Muse-style attention. */
+    private inner class RecordOverlay(context: Context) : FrameLayout(context) {
+        private val red = Color.rgb(232, 59, 44)
+        private val ink = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var phase = false
+
+        init { visibility = View.GONE }
+
+        fun show() {
+            phase = true
+            alpha = 0f
+            animate().cancel()
+            alpha = 1f
+            visibility = View.VISIBLE
+            postInvalidateOnAnimation()
+        }
+
+        fun hide() {
+            phase = false
+            visibility = View.GONE
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            if (!phase || visibility != View.VISIBLE) return
+            val clock = android.os.SystemClock.uptimeMillis() / 1000.0
+            val pulse = ((sin(clock * 6) + 1) / 2).toFloat()
+            val cx = width / 2f
+            val cy = height * .58f
+            // Backdrop: dim the conversation while recording.
+            ink.style = Paint.Style.FILL
+            ink.color = Color.argb(110, 0, 0, 0)
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), ink)
+            // Pulsing red dot on the mic button position (right side of the composer).
+            val dotR = (dp(9) + pulse * dp(5)).toFloat()
+            ink.color = red
+            canvas.drawCircle(width - dp(50).toFloat(), height - dp(36).toFloat(), dotR, ink)
+            // Waveform bars in the center.
+            val barW = dp(5).toFloat()
+            val gap = dp(5).toFloat()
+            val total = 9 * barW + 8 * gap
+            var x = cx - total / 2
+            repeat(9) { index ->
+                val hRatio = ((sin(clock * 7 + index * 1.4) + 1) / 2).toFloat()
+                val barH = dp(8) + hRatio * dp(56)
+                ink.color = cream
+                canvas.drawRoundRect(x, cy - barH / 2, x + barW, cy + barH / 2, dp(2).toFloat(), dp(2).toFloat(), ink)
+                x += barW + gap
+            }
+            // REC label.
+            ink.color = Color.WHITE
+            ink.textSize = dp(14).toFloat()
+            ink.textAlign = Paint.Align.CENTER
+            canvas.drawText("● REC", cx, cy - dp(46), ink)
+            if (phase) postInvalidateOnAnimation()
         }
     }
 

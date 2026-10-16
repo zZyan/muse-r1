@@ -16,9 +16,11 @@ import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ViewGroup
 import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -34,7 +36,10 @@ internal class MuseScreen(
     onClearHistory: () -> Unit = {},
     onSideChats: () -> Unit = {},
     onAttach: () -> Unit = {},
+    onSendText: (String) -> Unit = {},
 ) : FrameLayout(context) {
+    private val personaName: String
+        get() = preferences.getString("persona_name", null) ?: "Muse"
     private val background = Color.rgb(10, 11, 10)
     private val cream = Color.rgb(242, 233, 221)
     private val muted = Color.rgb(162, 154, 142)
@@ -66,7 +71,7 @@ internal class MuseScreen(
             if (voiceIndicator != null && isShown) postInvalidateOnAnimation()
         }
     }.apply {
-        textSize = 23f
+        textSize = 16f
         setTextColor(cream)
         typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
         includeFontPadding = false
@@ -106,12 +111,51 @@ internal class MuseScreen(
         setOnClickListener { jumpToLatest() }
     }
     private val volume = VolumeOverlay(context)
-    private val quickSize = dp(160)
-    private val bubble = BubbleButton(context, "Open side chats").apply {
+    private val bubble = BubbleButton(context, "Open side panel").apply {
         setOnClickListener { onSideChats() }
     }
-    private val attach = IconButton(context, "Add attachment", downArrow = false, plus = true).apply {
+    private val composer = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        setBackgroundColor(-0xe8e8e9)
+        setPadding(dp(14), dp(8), dp(14), dp(8))
+        gravity = Gravity.CENTER_VERTICAL
+    }
+    val composerInput = EditText(context).apply {
+        hint = "Message"
+        setHintTextColor(muted)
+        setTextColor(cream)
+        textSize = 15f
+        background = null
+        setPadding(dp(8), dp(10), dp(8), dp(10))
+        inputType = android.text.InputType.TYPE_CLASS_TEXT
+        imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEND
+        setSingleLine(true)
+        setOnEditorActionListener { _, action, _ ->
+            if (action == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
+                val value = text?.toString()?.trim().orEmpty()
+                if (value.isNotEmpty()) { onSendText(value); setText("") }
+                true
+            } else false
+        }
+    }
+    private val composerAttach = IconButton(context, "Add attachment", downArrow = false, plus = true).apply {
         setOnClickListener { onAttach() }
+    }
+    private val composerVoice = ComposerVoice(context).apply {
+        setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { onPress(); true }
+                MotionEvent.ACTION_UP -> {
+                    val held = event.eventTime - event.downTime >= 300
+                    onRelease(held)
+                    if (!held) view.performClick()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> { onRelease(false); true }
+                else -> true
+            }
+        }
+        setOnClickListener { }
     }
     private val dismissVolume = Runnable {
         volume.animate().alpha(0f).setDuration(180).withEndAction { hideVolume() }.start()
@@ -143,7 +187,10 @@ internal class MuseScreen(
         addView(clearHistory)
         addView(latest)
         addView(bubble)
-        addView(attach)
+        composer.addView(composerAttach, LinearLayout.LayoutParams(dp(44), dp(44)))
+        composer.addView(composerInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        composer.addView(composerVoice, LinearLayout.LayoutParams(dp(44), dp(44)))
+        addView(composer, LayoutParams(LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
         addView(volume)
         showIdle()
     }
@@ -174,11 +221,12 @@ internal class MuseScreen(
     }
 
     private fun layoutButtons() {
-        val pad = dp(10)
-        bubble.layout(pad, pad, pad + quickSize, pad + quickSize)
-        val half = quickSize / 2
-        attach.layout(width - pad - half, height - pad - half,
-            width - pad, height - pad)
+        val pad = dp(8)
+        bubble.layout(pad, pad, pad + dp(56), pad + dp(56))
+        composer.layout(0, height - dp(62), width, height)
+        composerAttach.layout(dp(14), dp(9), dp(58), dp(53))
+        composerVoice.layout(width - dp(58), dp(9), width - dp(14), dp(53))
+        composerInput.layout(dp(64), dp(9), width - dp(64), dp(53))
     }
 
     fun setUnread(total: Int) { bubble.unread = total }
@@ -402,8 +450,11 @@ internal class MuseScreen(
         clearHistory.measure(exact(dp(48)), exact(dp(48)))
         latest.measure(exact(dp(48)), exact(dp(48)))
         volume.measure(exact(w), exact(h))
-        bubble.measure(exact(quickSize), exact(quickSize))
-        attach.measure(exact(quickSize / 2), exact(quickSize / 2))
+        bubble.measure(exact(dp(56)), exact(dp(56)))
+        composer.measure(exact(w), exact(dp(62)))
+        composerAttach.measure(exact(dp(44)), exact(dp(44)))
+        composerInput.measure(exact(w - dp(116)), exact(dp(44)))
+        composerVoice.measure(exact(dp(44)), exact(dp(44)))
         for (index in 0 until childCount) {
             val child = getChildAt(index)
             if (child.tag == "side_panel") child.measure(exact(w), exact(h))
@@ -609,6 +660,43 @@ internal class MuseScreen(
                 canvas.drawLine(cx - dp(2), cy, cx - dp(2), cy + dp(6), ink)
                 canvas.drawLine(cx + dp(2), cy, cx + dp(2), cy + dp(6), ink)
             }
+        }
+    }
+
+    /** Mic button in the composer; hold to talk (same gesture contract as the avatar). */
+    private inner class ComposerVoice(context: Context) : View(context) {
+        private val ink = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        init {
+            contentDescription = "Voice input. Hold to talk, release to send."
+            isClickable = true
+            isFocusable = true
+        }
+
+        override fun performClick(): Boolean { super.performClick(); return true }
+
+        override fun onDraw(canvas: Canvas) {
+            val cx = width / 2f
+            val cy = height / 2f
+            val radius = width / 2f - dp(2)
+            ink.style = Paint.Style.FILL
+            ink.color = if (isPressed) Color.rgb(57, 43, 30) else this@MuseScreen.background
+            canvas.drawCircle(cx, cy, radius, ink)
+            ink.style = Paint.Style.STROKE
+            ink.strokeWidth = dp(1).toFloat()
+            ink.color = muted
+            canvas.drawCircle(cx, cy, radius - dp(1), ink)
+            ink.style = Paint.Style.FILL
+            ink.color = cream
+            val body = radius * .34f
+            canvas.drawRoundRect(cx - body, cy - radius * .46f, cx + body, cy + radius * .28f,
+                body, body, ink)
+            val feet = radius * .22f
+            ink.style = Paint.Style.STROKE
+            ink.strokeWidth = dp(2).toFloat()
+            ink.strokeCap = Paint.Cap.ROUND
+            canvas.drawLine(cx - feet, cy + radius * .06f, cx + feet, cy + radius * .06f, ink)
+            canvas.drawLine(cx, cy + radius * .06f, cx, cy + radius * .48f, ink)
         }
     }
 

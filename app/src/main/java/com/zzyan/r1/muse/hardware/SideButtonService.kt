@@ -56,6 +56,13 @@ class SideButtonService : AccessibilityService() {
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_POWER) {
+            android.util.Log.d("MuseDebug", "POWER key seen: action=" + event.action +
+                " downTime=" + event.downTime + " eventTime=" + event.eventTime +
+                " repeat=" + event.repeatCount + " canceled=" + event.isCanceled)
+            // Pass through to the system for now; gesture wiring lands once receipt is proven.
+            return false
+        }
         if (event.keyCode == KeyEvent.KEYCODE_DPAD_UP || event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
             // Consume before ViewRootImpl can leave touch mode or focus a background control.
             if (event.action == KeyEvent.ACTION_DOWN && onWheel(

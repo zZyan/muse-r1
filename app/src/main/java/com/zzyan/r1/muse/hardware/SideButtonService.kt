@@ -77,7 +77,14 @@ class SideButtonService : AccessibilityService() {
             return false
         }
         if (event.keyCode != KeyEvent.KEYCODE_PAIRING) return false
-        if (!power.isInteractive) { cancelGesture(); return true }
+        if (!power.isInteractive) {
+            cancelGesture()
+            // The remapped power key no longer wakes the screen natively — wake via root.
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                Thread { try { Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent WAKEUP")) } catch (_: Exception) { } }.start()
+            }
+            return true
+        }
         when (event.action) {
             KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0 && event.downTime > acceptAfter) {
                 if (CameraActivity.instance !== null) {

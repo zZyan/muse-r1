@@ -8,7 +8,7 @@ class ReplyTrackerTest {
     @Test fun liveTranscriptionWaitsForAckAndMatchesOnlyItsExactMessageId() {
         val transcripts = mutableListOf<String>()
         val replies = mutableListOf<String>()
-        val tracker = ReplyTracker({ transcripts.add(it) }) { _, text, _ -> replies.add(text) }
+        val tracker = ReplyTracker({ transcripts.add(it) }, { _, text, _ -> replies.add(text) })
         tracker.event("""{"type":"event","seq":99,"event":"agent.status","payload":{}}""")
         tracker.begin()
         tracker.event("""{"type":"event","seq":1,"event":"message.user","payload":{"message_id":"previous-turn","display_text":"Wrong parent"}}""")
@@ -24,7 +24,7 @@ class ReplyTrackerTest {
 
     @Test fun liveTranscriptionSkipsPlaceholdersReplaysAndCanceledOrPreviousTurns() {
         val transcripts = mutableListOf<String>()
-        val tracker = ReplyTracker({ transcripts.add(it) }) { _, _, _ -> }
+        val tracker = ReplyTracker({ transcripts.add(it) }, { _, _, _ -> })
         tracker.begin(); tracker.ack("""{"message_id":"first"}""")
         tracker.event("""{"type":"event","seq":1,"event":"message.user","payload":{"message_id":"first","display_text":"[Voice note]"}}""")
         tracker.event("""{"type":"event","seq":2,"event":"message.user","payload":{"message_id":"first","display_text":" \n[file:audio/wav voice_note.wav]"}}""")
@@ -40,7 +40,7 @@ class ReplyTrackerTest {
     }
 
     @Test fun transcriptionUsesTheAcknowledgedMessageNotItsParentAndResetsBetweenTurns() {
-        val tracker = ReplyTracker { _, _, _ -> }
+        val tracker = ReplyTracker({}, { _, _, _ -> })
         tracker.event("""{"type":"event","seq":19,"event":"message.user","payload":{}}""")
         tracker.begin()
         assertEquals(19L, tracker.lastSeq)
@@ -80,7 +80,7 @@ class ReplyTrackerTest {
     @Test fun earlyRepliesAreBoundToAckAndSpeechOnlyStartsOnce() {
         val replies = mutableListOf<Triple<String, String, Boolean>>()
         val spoken = mutableListOf<String>()
-        val tracker = ReplyTracker { id, text, done -> replies.add(Triple(id, text, done)); if (done) spoken.add(id) }
+        val tracker = ReplyTracker({}, { id, text, done -> replies.add(Triple(id, text, done)); if (done) spoken.add(id) })
         tracker.event("""{"type":"event","seq":1,"event":"delta.message_done","payload":{"message_id":"history","content":"Old"}}""")
         tracker.begin()
         tracker.event("""{"type":"event","seq":2,"event":"delta.message_done","payload":{"message_id":"other","reply_to_message_id":"not-ours","content":"Wrong"}}""")
@@ -98,7 +98,7 @@ class ReplyTrackerTest {
     }
     @Test fun oldTurnAndReplayCannotLeakIntoNextTurn() {
         val spoken = mutableListOf<String>()
-        val tracker = ReplyTracker { id, _, done -> if (done) spoken.add(id) }
+        val tracker = ReplyTracker({}, { id, _, done -> if (done) spoken.add(id) })
         tracker.begin(); tracker.ack("""{"message_id":"first"}""")
         tracker.event("""{"type":"event","seq":1,"event":"delta.message_done","payload":{"id":"r1","parent_message_id":"first","content":"First"}}""")
         tracker.begin(); tracker.ack("""{"message_id":"second"}""")
@@ -111,7 +111,7 @@ class ReplyTrackerTest {
     @Test fun structuredTranscriptExtractsAssistantTextAndIgnoresEmptyToolEvents() {
         val replies = mutableListOf<String>()
         val spoken = mutableListOf<String>()
-        val tracker = ReplyTracker { id, text, done -> replies.add(text); if (done) spoken.add(id) }
+        val tracker = ReplyTracker({}, { id, text, done -> replies.add(text); if (done) spoken.add(id) })
         tracker.begin(); tracker.ack("""{"message_id":"user"}""")
         tracker.event("""{"type":"event","seq":1,"event":"delta.message_done","payload":{"id":"empty","transcript":{"messages":[]}}}""")
         tracker.event("""{"type":"event","seq":2,"event":"delta.message_done","payload":{"id":"reply","transcript":{"messages":[{"role":"user","content":[{"type":"text","text":"Do not read me"}]},{"role":"assistant","content":[{"type":"text","text":"Muse on "},{"type":"image","text":"Ignore image"},{"type":"text","text":"Rabbit is working."}]}]}}}""")

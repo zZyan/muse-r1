@@ -7,9 +7,12 @@ import org.json.JSONObject
 internal class ReplyTracker(
     private val onUserTranscript: (String) -> Unit = {},
     private val onReply: (String, String, Boolean) -> Unit,
+    private val onStatusEvent: (String) -> Unit = {},
+    private val onSessionActivity: (String) -> Unit = {},
 ) {
     private var active = false
     private var acked = false
+    private var session: String? = null
     var lastSeq = 0L
         private set
     var userMessageId: String? = null
@@ -21,12 +24,13 @@ internal class ReplyTracker(
     private val pending = mutableListOf<JSONObject>()
     private var userText: String? = null
 
-    fun begin() { active = true; acked = false; userMessageId = null; userText = null; userIds.clear(); messageIds.clear(); finished.clear(); lengths.clear(); pending.clear() }
+    fun begin(sessionId: String? = null) { active = true; acked = false; session = sessionId; userMessageId = null; userText = null; userIds.clear(); messageIds.clear(); finished.clear(); lengths.clear(); pending.clear() }
     fun cancel() { active = false; pending.clear() }
     fun ack(text: String) {
         val json = JSONObject(text)
         val payload = json.optJSONObject("result") ?: json
         userMessageId = payload.optString("message_id").takeIf { it.isNotBlank() }
+        if (session == null) session = payload.optString("session_id").takeIf { it.isNotBlank() }
         listOf("message_id", "reply_to_message_id").map { payload.optString(it) }.filter { it.isNotBlank() }.forEach(userIds::add)
         if (userIds.isEmpty()) throw ProtocolException("missing turn acknowledgement")
         acked = true
@@ -41,16 +45,27 @@ internal class ReplyTracker(
         // Bind it by the acknowledged ID and deduplicate its text instead of the subscription cursor.
         if (seq > 0 && seq <= lastSeq && json.optString("event") != "message.user") return
         lastSeq = maxOf(seq, lastSeq)
+        observeSession(json)
         if (!active) return
         if (!acked) {
             if (pending.size >= 128) throw ProtocolException("too many early events")
             pending.add(json)
         } else deliver(json)
     }
+    /** Any event carrying a session_id that is not the active turn's session belongs to another chat. */
+    private fun observeSession(json: JSONObject) {
+        val payload = json.optJSONObject("payload") ?: return
+        val other = payload.optString("session_id").ifBlank { json.optString("session_id") }
+        if (other.isNotBlank() && other != session) onSessionActivity(other)
+    }
     private fun deliver(json: JSONObject) {
         val event = json.optString("event")
-        if (event !in setOf("message.user", "delta.message_start", "delta.text_append", "delta.message_done", "message.assistant")) return
+        if (event !in setOf("message.user", "delta.message_start", "delta.text_append", "delta.message_done",
+                "message.assistant", "agent.status", "task.status")) return
         val payload = json.optJSONObject("payload") ?: return
+        if (event in setOf("agent.status", "task.status")) { deliverStatus(event, payload); return }
+        val eventSession = payload.optString("session_id").ifBlank { json.optString("session_id") }
+        if (eventSession.isNotBlank() && eventSession != session) return
         val id = payload.optString("message_id").ifBlank { json.optString("message_id") }.ifBlank { payload.optString("id") }
         if (event == "message.user") {
             if (id == userMessageId) transcriptionText(payload)?.let { text ->
@@ -75,6 +90,22 @@ internal class ReplyTracker(
             if (text.isEmpty() && lengths.getOrDefault(id, 0) == 0) return
             finished.add(id)
             onReply(id, text, true)
+        }
+    }
+
+    private fun deliverStatus(event: String, payload: JSONObject) {
+        when (event) {
+            "agent.status" -> {
+                val activity = payload.optString("activity_code").ifBlank { payload.optString("activity") }
+                if (activity.isBlank()) return
+                onStatusEvent(if (activity == "online" || activity == "idle") "" else
+                    payload.optString("activity_text").ifBlank { activity })
+            }
+            "task.status" -> {
+                val status = payload.optString("status")
+                onStatusEvent(if (status == "running") "Working on a task"
+                    else if (status in setOf("completed", "failed", "errored", "cancelled", "canceled")) "Task $status" else "")
+            }
         }
     }
 

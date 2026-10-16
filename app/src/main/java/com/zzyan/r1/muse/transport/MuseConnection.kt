@@ -22,6 +22,8 @@ class MuseConnection(
     private val onStatus: (String) -> Unit,
     private val onReply: (messageId: String, text: String, done: Boolean) -> Unit,
     private val onUserTranscript: (String) -> Unit = {},
+    private val onStatusEvent: (String) -> Unit = {},
+    private val onSessionActivity: (String) -> Unit = {},
 ) {
     private val client = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(20, TimeUnit.SECONDS).build()
@@ -32,9 +34,9 @@ class MuseConnection(
     private var ws: WebSocket? = null
     private var handshake: NoiseHandshake? = null
     private var noise: NoiseCipherPair? = null
-    private var subscription = 0L
+    private val subscriptionStreams = mutableMapOf<Long, String?>() // stream id → session (null = main)
     private var closed = false
-    private val replies = ReplyTracker(onUserTranscript, onReply)
+    private val replies = ReplyTracker(onUserTranscript, onReply, onStatusEvent, onSessionActivity)
     private var transcriptAfterSeq = 0L
 
     private class Vm(val token: String, val id: String)
@@ -56,12 +58,15 @@ class MuseConnection(
         } catch (error: Exception) { close(); throw IllegalStateException("Muse connection failed", error) }
     }
 
-    suspend fun sendText(text: String) {
+    suspend fun sendText(text: String, sessionId: String? = null) {
         require(text.isNotBlank())
-        sendChat(JSONObject().put("message", text).put("output_modality", "text").toString().toByteArray())
+        val body = JSONObject().put("message", text).put("output_modality", "text")
+            .put("device_id", credentials.deviceId)
+        sessionId?.let { body.put("session_id", it) }
+        sendChat(body.toString().toByteArray(), sessionId)
     }
 
-    suspend fun sendVoice(wav: ByteArray): String? {
+    suspend fun sendVoice(wav: ByteArray, sessionId: String? = null, extraItems: List<JSONObject> = emptyList()): String? {
         require(wav.size in 45..640044)
         val item = JSONObject().put("type", "file").put("mime_type", "audio/wav")
             .put("filename", "voice_note.wav").put("data_base64", Base64.getEncoder().encodeToString(wav))
@@ -77,8 +82,12 @@ class MuseConnection(
             null
         }
         // Our voice-mode tests returned server errors; Android speaks the working text-mode reply.
-        val messageId = sendChat(JSONObject().put("message", "").put("output_modality", "text")
-            .put("items", JSONArray().put(item)).toString().toByteArray(), before)
+        val items = JSONArray().put(item)
+        extraItems.forEach { items.put(it) }
+        val body = JSONObject().put("message", "").put("output_modality", "text")
+            .put("items", items).put("device_id", credentials.deviceId)
+        sessionId?.let { body.put("session_id", it) }
+        val messageId = sendChat(body.toString().toByteArray(), sessionId, before)
         return messageId.takeIf { before != null }
     }
 
@@ -96,6 +105,44 @@ class MuseConnection(
                 transcriptAfterSeq = maxOf(transcriptAfterSeq, row.optLong("seq"))
             }
             return com.zzyan.r1.muse.transport.userTranscript(history, messageId)
+        }
+    }
+
+    suspend fun fetchRemoteHistory(limit: Int = 20): List<Pair<String, String>> {
+        val completed = CompletableDeferred<Unit>()
+        val id: Long
+        val stream: Stream
+        synchronized(lock) {
+            check(!closed && ready.isCompleted && !ready.isCancelled)
+            id = start("GET", "/chat/history?limit=$limit", emptyList(), completed)
+            stream = streams.getValue(id)
+        }
+        try {
+            withTimeout(5_000) { completed.await() }
+            val json = JSONObject(stream.body.toString(Charsets.UTF_8.name()))
+            check(json.optBoolean("ok")) { "History unavailable" }
+            val rows = json.getJSONObject("result").getJSONArray("chat_events")
+            val turns = mutableListOf<Pair<String, String>>()
+            var user: String? = null
+            (0 until rows.length()).forEach { index ->
+                val row = rows.getJSONObject(index)
+                when (row.optString("event_name")) {
+                    "message.user" -> {
+                        user?.let { turns.add(it to "") }
+                        user = row.optString("display_text").trim().takeIf { it.isNotBlank() && it != "[Voice note]" }
+                    }
+                    "message.assistant" -> {
+                        val text = row.optString("display_text").trim()
+                        if (user != null && text.isNotBlank()) { turns.add(user!! to text); user = null }
+                    }
+                }
+            }
+            user?.let { turns.add(it to "") }
+            return turns
+        } finally {
+            synchronized(lock) {
+                if (streams.remove(id) != null && !closed) sendFrame(ServiceFrame(id, Reset(1, "cancelled")))
+            }
         }
     }
 
@@ -133,13 +180,25 @@ class MuseConnection(
         onStatus("Disconnected")
     }
 
-    private suspend fun sendChat(body: ByteArray, afterSeq: Long? = null): String? {
+    /** Open a dedicated NDJSON subscription for one side chat; deltas flow per session. */
+    suspend fun subscribeSession(sessionId: String) {
+        synchronized(lock) {
+            check(!closed && ready.isCompleted && !ready.isCancelled)
+            if (subscriptionStreams.containsValue(sessionId)) return
+        }
+        val mainId = start("POST", "/chat/subscribe", listOf(Header("content-type", "application/json"),
+            Header("accept", "application/x-ndjson")), null,
+            JSONObject().put("session_id", sessionId).toString().toByteArray())
+        synchronized(lock) { subscriptionStreams[mainId] = sessionId }
+    }
+
+    private suspend fun sendChat(body: ByteArray, sessionId: String? = null, afterSeq: Long? = null): String? {
         val completed = CompletableDeferred<Unit>()
         val id: Long
         synchronized(lock) {
-            check(!closed && noise != null && subscription != 0L && ready.isCompleted && !ready.isCancelled)
+            check(!closed && noise != null && subscriptionStreams.isNotEmpty() && ready.isCompleted && !ready.isCancelled)
             transcriptAfterSeq = afterSeq ?: replies.lastSeq
-            replies.begin()
+            replies.begin(sessionId)
             id = start("POST", "/chat/stream", listOf(Header("content-type", "application/json")), completed, end = false)
             var offset = 0
             while (offset < body.size) {
@@ -231,8 +290,9 @@ class MuseConnection(
                         val (message3, pair) = h.message3(bytes.toByteArray())
                         noise = pair; handshake = null; h.destroy()
                         check(webSocket.send(ByteString.of(*message3)))
-                        subscription = start("POST", "/chat/subscribe", listOf(Header("content-type", "application/json"),
+                        val mainId = start("POST", "/chat/subscribe", listOf(Header("content-type", "application/json"),
                             Header("accept", "application/x-ndjson")), ready, "{}".toByteArray())
+                        subscriptionStreams[mainId] = null
                     } else {
                         val plain = noise!!.decrypt(bytes.toByteArray()) ?: return
                         handle(WireCodec.decodeResponseEnvelope(plain))
@@ -279,7 +339,8 @@ class MuseConnection(
                 append(stream, value.body)
                 if (value.status !in 200..299) { finish(frame.streamId, stream); return }
                 if (stream.path == "/chat/subscribe") { consumeLines(stream); stream.complete?.complete(Unit) }
-                if (value.end) finish(frame.streamId, stream)
+                if (value.end && subscriptionStreams.containsKey(frame.streamId)) finish(frame.streamId, stream)
+                else if (value.end && frame.streamId !in streams.keys) { /* body streams with end flag */ }
             }
             is BodyChunk -> {
                 append(stream, value.data)
@@ -289,7 +350,8 @@ class MuseConnection(
             is Reset -> {
                 streams.remove(frame.streamId)
                 stream.complete?.completeExceptionally(IllegalStateException("Muse cancelled the request"))
-                if (frame.streamId == subscription) fail()
+                if (subscriptionStreams.remove(frame.streamId) != null || frame.streamId == 0L) {} // id 0 unused
+                if (subscriptionStreams.isEmpty()) fail()
             }
             else -> throw ProtocolException("unexpected response frame")
         }
@@ -311,7 +373,7 @@ class MuseConnection(
         streams.remove(id)
         if (stream.status !in 200..299) {
             stream.complete?.completeExceptionally(IllegalStateException("Muse request failed (HTTP ${stream.status})"))
-            if (id == subscription) { fail(); return }
+            if (subscriptionStreams.containsKey(id)) { subscriptionStreams.remove(id); fail(); return }
             return
         }
         val bytes = stream.body.toByteArray()

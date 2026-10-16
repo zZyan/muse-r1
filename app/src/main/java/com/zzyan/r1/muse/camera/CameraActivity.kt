@@ -31,6 +31,7 @@ import android.os.Handler
 import android.os.Looper
 
 class CameraActivity : ComponentActivity() {
+    private val forMuse get() = intent.getBooleanExtra("for_muse", false)
     private lateinit var previewView: PreviewView
     private lateinit var status: TextView
     private lateinit var flipButton: Button
@@ -188,6 +189,14 @@ class CameraActivity : ComponentActivity() {
                             label = "SAVED(unflipped): ${e.message}"
                         }
                     }
+                    if (forMuse) {
+                        val result = android.content.Intent().apply {
+                            putExtra("photo_uri", outputFileResults.savedUri?.toString().orEmpty())
+                        }
+                        setResult(RESULT_OK, result)
+                        finish()
+                        return
+                    }
                     status.text = label
                     Toast.makeText(this@CameraActivity, "Photo saved", Toast.LENGTH_SHORT).show()
                 }
@@ -223,6 +232,7 @@ class CameraActivity : ComponentActivity() {
 
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == PERMISSION_REQUEST &&
             grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
             startCamera()

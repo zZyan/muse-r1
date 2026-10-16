@@ -16,6 +16,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import kotlin.math.min
@@ -28,6 +29,8 @@ internal class MuseScreen(
     onRelease: (Boolean) -> Unit,
     onControls: () -> Unit,
     onClearHistory: () -> Unit = {},
+    onSideChats: () -> Unit = {},
+    onAttach: () -> Unit = {},
 ) : FrameLayout(context) {
     private val background = Color.rgb(10, 11, 10)
     private val cream = Color.rgb(242, 233, 221)
@@ -100,6 +103,12 @@ internal class MuseScreen(
         setOnClickListener { jumpToLatest() }
     }
     private val volume = VolumeOverlay(context)
+    private val bubble = BubbleButton(context, "Open side chats").apply {
+        setOnClickListener { onSideChats() }
+    }
+    private val attach = IconButton(context, "Add attachment", downArrow = false, plus = true).apply {
+        setOnClickListener { onAttach() }
+    }
     private val dismissVolume = Runnable {
         volume.animate().alpha(0f).setDuration(180).withEndAction { hideVolume() }.start()
     }
@@ -129,6 +138,8 @@ internal class MuseScreen(
         addView(hint)
         addView(clearHistory)
         addView(latest)
+        addView(bubble)
+        addView(attach)
         addView(volume)
         showIdle()
     }
@@ -156,6 +167,68 @@ internal class MuseScreen(
         hint.visibility = if (preferences.getBoolean("used_voice", false)) View.GONE else View.VISIBLE
         resizeCharacter(false)
     }
+
+    private fun layoutButtons() {
+        val pad = dp(8)
+        bubble.layout(pad, pad, pad + dp(44), pad + dp(44))
+        attach.layout(width - pad - dp(40), pad, width - pad, pad + dp(40))
+    }
+
+    fun setUnread(total: Int) { bubble.unread = total }
+
+    fun showAttachHint() = showNotice("Photo attached.\nSay something to send it with your voice note, or hold the background to discard.")
+
+    fun showSideChats(
+        current: String?, chats: List<com.zzyan.r1.muse.core.SideChats.Chat>,
+        onPick: (String?) -> Unit, onNew: () -> Unit,
+    ) {
+        hideSideChats()
+        val overlay = FrameLayout(context).apply {
+            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            setOnClickListener { hideSideChats() }
+        }
+        val sheet = FrameLayout(context).apply {
+            setBackgroundColor(Color.rgb(22, 23, 22))
+            setOnClickListener { }
+            val pad = dp(16)
+            setPadding(pad, pad, pad, pad)
+        }
+        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        fun row(label: String, unread: Int, isCurrent: Boolean, action: () -> Unit) {
+            val item = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(dp(10), dp(12), dp(10), dp(12))
+                gravity = Gravity.CENTER_VERTICAL
+                if (isCurrent) setBackgroundColor(Color.rgb(46, 47, 46))
+                setOnClickListener { hideSideChats(); action() }
+                if (unread > 0) addView(View(context).apply {
+                    layoutParams = LinearLayout.LayoutParams(dp(10), dp(10)).apply { marginEnd = dp(10) }
+                    setBackgroundColor(Color.rgb(52, 120, 246))
+                })
+                addView(text(label, 16f, if (isCurrent) orange else cream).apply {
+                    layoutParams = LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+                })
+                if (unread > 0) addView(text("$unread unread", 11f, muted))
+            }
+            list.addView(item, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        }
+        row(if (current == null) "Main chat  ●" else "Main chat", 0, current == null) { onPick(null) }
+        chats.forEach { chat ->
+            row(chat.name, chat.unread, chat.id == current) { onPick(chat.id) }
+        }
+        row("+ New side chat", 0, false) { onNew() }
+        sheet.addView(list, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+        overlay.addView(sheet, LayoutParams(width / 7 * 6, LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER_VERTICAL or Gravity.START))
+        overlay.tag = "side_panel"
+        addView(overlay)
+    }
+
+    fun hideSideChats() {
+        (0 until childCount).map { getChildAt(it) }.filter { it.tag == "side_panel" }.forEach { removeView(it) }
+    }
+
+    fun sideChatsOpen() = (0 until childCount).any { getChildAt(it).tag == "side_panel" }
 
     fun showNotice(value: String) {
         voiceIndicator = null
@@ -306,6 +379,12 @@ internal class MuseScreen(
         clearHistory.measure(exact(dp(48)), exact(dp(48)))
         latest.measure(exact(dp(48)), exact(dp(48)))
         volume.measure(exact(w), exact(h))
+        bubble.measure(exact(dp(44)), exact(dp(44)))
+        attach.measure(exact(dp(40)), exact(dp(40)))
+        for (index in 0 until childCount) {
+            val child = getChildAt(index)
+            if (child.tag == "side_panel") child.measure(exact(w), exact(h))
+        }
     }
 
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
@@ -324,9 +403,10 @@ internal class MuseScreen(
         status.layout(dp(26), contentTop - dp(24), width - dp(26), contentTop)
         scroll.layout(0, contentTop, width, height - dp(8))
         hint.layout(dp(10), height - dp(53), width - dp(10), height - dp(17))
-        clearHistory.layout(width - dp(62), dp(14), width - dp(14), dp(62))
+        clearHistory.layout(width - dp(62), dp(72), width - dp(14), dp(120))
         latest.layout((width - dp(48)) / 2, height - dp(68), (width + dp(48)) / 2, height - dp(20))
         volume.layout(0, 0, width, height)
+        layoutButtons()
         updateLatestButton()
     }
 
@@ -444,7 +524,8 @@ internal class MuseScreen(
         }
     }
 
-    private inner class IconButton(context: Context, label: String, private val downArrow: Boolean) : View(context) {
+    private inner class IconButton(context: Context, label: String, private val downArrow: Boolean,
+        private val plus: Boolean = false) : View(context) {
         private val ink = Paint(Paint.ANTI_ALIAS_FLAG)
 
         init {
@@ -478,6 +559,10 @@ internal class MuseScreen(
                 canvas.drawLine(cx, cy - dp(8), cx, cy + dp(8), ink)
                 canvas.drawLine(cx - dp(6), cy + dp(2), cx, cy + dp(8), ink)
                 canvas.drawLine(cx, cy + dp(8), cx + dp(6), cy + dp(2), ink)
+            } else if (plus) {
+                ink.color = cream
+                canvas.drawLine(cx, cy - dp(9), cx, cy + dp(9), ink)
+                canvas.drawLine(cx - dp(9), cy, cx + dp(9), cy, ink)
             } else {
                 canvas.drawLine(cx - dp(8), cy - dp(7), cx + dp(8), cy - dp(7), ink)
                 canvas.drawLine(cx - dp(3), cy - dp(11), cx + dp(3), cy - dp(11), ink)
@@ -485,6 +570,48 @@ internal class MuseScreen(
                     cy + dp(10).toFloat(), dp(2).toFloat(), dp(2).toFloat(), ink)
                 canvas.drawLine(cx - dp(2), cy, cx - dp(2), cy + dp(6), ink)
                 canvas.drawLine(cx + dp(2), cy, cx + dp(2), cy + dp(6), ink)
+            }
+        }
+    }
+
+    /** Left-corner chat bubble: opens the side-chat panel; dot shows total unread. */
+    private inner class BubbleButton(context: Context, label: String) : View(context) {
+        private val ink = Paint(Paint.ANTI_ALIAS_FLAG)
+        var unread = 0
+            set(value) { field = value; invalidate() }
+
+        init {
+            contentDescription = label
+            isClickable = true
+            isFocusable = true
+        }
+
+        override fun onInitializeAccessibilityNodeInfo(info: android.view.accessibility.AccessibilityNodeInfo) {
+            super.onInitializeAccessibilityNodeInfo(info)
+            info.className = "android.widget.Button"
+        }
+
+        override fun performClick(): Boolean { super.performClick(); return true }
+
+        override fun onDraw(canvas: Canvas) {
+            val cx = width / 2f
+            val cy = height / 2f
+            ink.style = Paint.Style.FILL
+            ink.color = if (isPressed) Color.rgb(57, 43, 30) else this@MuseScreen.background
+            canvas.drawCircle(cx, cy, dp(22).toFloat(), ink)
+            ink.strokeWidth = dp(1).toFloat()
+            ink.style = Paint.Style.STROKE
+            ink.color = muted
+            canvas.drawCircle(cx, cy, dp(21).toFloat(), ink)
+            ink.style = Paint.Style.FILL
+            ink.color = cream
+            ink.textSize = dp(18).toFloat()
+            ink.textAlign = Paint.Align.CENTER
+            val fm = ink.fontMetrics
+            canvas.drawText("💬", cx, cy - (fm.ascent + fm.descent) / 2, ink)
+            if (unread > 0) {
+                ink.color = Color.rgb(52, 120, 246)
+                canvas.drawCircle(width - dp(6).toFloat(), dp(6).toFloat(), dp(5).toFloat(), ink)
             }
         }
     }
@@ -521,11 +648,11 @@ internal class MuseScreen(
         var compact = 0f
         var phase = Phase.QUIET
             set(value) { field = value; invalidate() }
-        private val bitmap = BitmapFactory.decodeResource(resources, R.drawable.muse_character)
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        private val image = RectF()
-        private val source = Rect()
-        private val portraitClip = Path()
+        // The user's own emoji stands in for the plush illustration, whose redistribution
+        // rights are not established. Set via preferences key "avatar_emoji".
+        private val glyph = context.getSharedPreferences("gadget_ui", Context.MODE_PRIVATE)
+            .getString("avatar_emoji", "🙂").orEmpty().ifBlank { "🙂" }
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         private var glow: RadialGradient? = null
 
         override fun performClick(): Boolean {
@@ -535,8 +662,6 @@ internal class MuseScreen(
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
-            portraitClip.rewind()
-            portraitClip.addCircle(w / 2f, h / 2f, w * .38f, Path.Direction.CW)
             glow = RadialGradient(w / 2f, h / 2f, w / 2f, orange, Color.TRANSPARENT, Shader.TileMode.CLAMP)
         }
 
@@ -544,43 +669,40 @@ internal class MuseScreen(
             super.onDraw(canvas)
             val clock = android.os.SystemClock.uptimeMillis() / 1000.0
             val pulse = ((sin(clock * 3) + 1) / 2).toFloat()
-            val margin = width * .06f * compact
-            image.set(margin, margin, width - margin, height - margin)
+            paint.style = Paint.Style.FILL
+            paint.alpha = 255
+            val center = width / 2f
+            val radius = width * .42f
+            val glowAlpha = if (phase == Phase.QUIET) 18 else (28 + pulse * 22).toInt()
+            paint.shader = glow
+            paint.alpha = glowAlpha
+            canvas.drawCircle(center, center, width / 2f, paint)
+            paint.shader = null
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = dp(1).toFloat()
+            paint.color = orange
+            paint.alpha = when (phase) {
+                Phase.LISTENING -> (150 + pulse * 100).toInt()
+                Phase.THINKING -> 170
+                else -> 0
+            }
+            if (phase == Phase.THINKING) canvas.drawArc(center - radius, center - radius,
+                center + radius, center + radius, (clock * 140 % 360).toFloat(), 90f, false, paint)
+            else canvas.drawCircle(center, center, radius, paint)
             paint.style = Paint.Style.FILL
             paint.alpha = 255
             if (compact > 0f) {
-                val center = width / 2f
-                val radius = width * .42f
-                val glowAlpha = if (phase == Phase.QUIET) 18 else (28 + pulse * 22).toInt()
-                paint.shader = glow
-                paint.alpha = glowAlpha
-                canvas.drawCircle(center, center, width / 2f, paint)
-                paint.shader = null
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = dp(1).toFloat()
-                paint.color = orange
-                paint.alpha = when (phase) {
-                    Phase.LISTENING -> (150 + pulse * 100).toInt()
-                    Phase.THINKING -> 170
-                    else -> 0
-                }
-                if (phase == Phase.THINKING) canvas.drawArc(center - radius, center - radius,
-                    center + radius, center + radius, (clock * 140 % 360).toFloat(), 90f, false, paint)
-                else canvas.drawCircle(center, center, radius, paint)
-                paint.style = Paint.Style.FILL
-                paint.alpha = 255
+                val ring = Path().apply { addCircle(center, center, radius, Path.Direction.CW) }
+                canvas.save(); canvas.clipPath(ring)
             }
-            // The full plush body becomes the round, face-focused portrait as it shrinks.
-            val bw = bitmap.width.toFloat()
-            val bh = bitmap.height.toFloat()
-            source.set((bw * .19f * compact).toInt(), (bh * .13f * compact).toInt(),
-                (bw * (1 - .19f * compact)).toInt(), (bh * (1 - .25f * compact)).toInt())
-            canvas.save()
-            if (compact > .99f) canvas.clipPath(portraitClip)
-            canvas.drawBitmap(bitmap, source, image, paint)
-            canvas.restore()
+            paint.color = Color.WHITE
+            paint.textSize = width * .52f
+            paint.textAlign = Paint.Align.CENTER
+            val metrics = paint.fontMetrics
+            canvas.drawText(glyph, center, center - (metrics.ascent + metrics.descent) / 2, paint)
+            if (compact > 0f) canvas.restore()
+            paint.color = orange
             if (phase == Phase.SPEAKING) {
-                paint.color = orange
                 repeat(3) { index ->
                     val bar = dp(5) + (dp(9) * ((sin(clock * 7 + index * 1.8) + 1) / 2)).toFloat()
                     val x = width * .80f + index * dp(5)

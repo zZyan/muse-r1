@@ -19,6 +19,9 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.widget.TextView
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import org.json.JSONObject
 import com.zzyan.r1.muse.hardware.SideButtonService
 import com.zzyan.r1.muse.pairing.PairingServer
 import com.zzyan.r1.muse.transport.MuseConnection
@@ -40,6 +43,7 @@ class MainActivity : Activity() {
     private var turnTimeout: Job? = null
     private var transcriptFetch: Job? = null
     private var controls: AlertDialog? = null
+    private var attachMenu: AlertDialog? = null
     private var clearDialog: AlertDialog? = null
     private var transcriptPending = false
     private val history = mutableListOf<ConversationTurn>()
@@ -48,9 +52,13 @@ class MainActivity : Activity() {
     private var historyLoad: Job? = null
     private val hasConversation get() = history.isNotEmpty()
     private val historyStore get() = (application as MuseApp).displayHistory
+    private var serverHistoryFetched = false
+    private val sideChats by lazy { SideChats(this) }
+    private var currentSession: String? = null
+    private var pendingItems = mutableListOf<JSONObject>()
+    private var pendingItemsLabel = ""
     private val shake = ShakeDetector()
     private val sensors by lazy { getSystemService(SensorManager::class.java) }
-    private val autoRotate by lazy { AutoRotate(this) }
     private val shakeListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             if (!historyLoaded || !hasConversation || recording || sending ||
@@ -72,7 +80,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         volumeControlStream = AudioManager.STREAM_MUSIC
-        screen = MuseScreen(this, ::beginRecording, ::finishRecording, ::showControls, ::confirmClearHistory)
+        screen = MuseScreen(this, ::beginRecording, ::finishRecording, ::showControls, ::confirmClearHistory,
+            ::showSideChatList, ::showAttachMenu)
         status = screen.status
         message = screen.message
         setContentView(screen)
@@ -89,7 +98,7 @@ class MainActivity : Activity() {
         if (historyLoaded || historyLoad?.isActive == true) return
         historyLoad = scope.launch {
             try {
-                history.addAll(historyStore.load())
+                history.addAll(loadVisibleHistory())
                 historyLoaded = true
                 if (hasConversation) { renderConversation(); screen.jumpToLatest() }
                 screen.setHistoryState(hasConversation, !recording && !sending)
@@ -99,6 +108,116 @@ class MainActivity : Activity() {
                 screen.showNotice("Couldn't open display history. Reopen Muse to try again.")
             }
         }
+    }
+
+    private suspend fun loadVisibleHistory(): List<ConversationTurn> {
+        val session = currentSession ?: return historyStore.load()
+        return sideChats.load(session)
+    }
+
+    private fun saveVisibleHistory() {
+        val session = currentSession
+        if (session == null) historyStore.save(history) else sideChats.save(session, history)
+    }
+
+    private fun showSideChatList() {
+        screen.showSideChats(currentSession, sideChats.list(), ::switchSession) { switchSession(sideChats.create()) }
+    }
+
+    private fun switchSession(session: String?) {
+        if (session == currentSession) return
+        transcriptFetch?.cancel(); transcriptPending = false
+        if (recording) finishRecording(false)
+        sending = false; turnTimeout?.cancel(); activeTurn = null
+        if (session == null) screen.setUnread(sideChats.totalUnread())
+        currentSession?.let { sideChats.save(it, history.toList()) }
+        currentSession = session
+        if (session != null) {
+            sideChats.markRead(session)
+            connection?.let { current ->
+                scope.launch { try { withContext(Dispatchers.IO) { current.subscribeSession(session) } } catch (_: Exception) { } }
+            }
+        }
+        screen.setUnread(sideChats.totalUnread())
+        history.clear()
+        historyLoaded = false
+        scope.launch {
+            try {
+                val turns = loadVisibleHistory()
+                history.addAll(turns)
+                historyLoaded = true
+                if (hasConversation) { renderConversation(); screen.jumpToLatest() } else screen.showIdle()
+            } catch (_: Exception) {
+                historyLoaded = true
+                screen.showIdle()
+            }
+        }
+    }
+
+    private fun showAttachMenu() {
+        if (recording || sending || controls?.isShowing == true || clearDialog?.isShowing == true) return
+        attachMenu = AlertDialog.Builder(this)
+            .setTitle("Attachment")
+            .setItems(arrayOf("Take photo", "Choose file")) { _, item ->
+                when (item) {
+                    0 -> {
+                        val intent = Intent(this, com.zzyan.r1.muse.camera.CameraActivity::class.java)
+                            .putExtra("for_muse", true)
+                        startActivityForResult(intent, 7101)
+                    }
+                    else -> startActivityForResult(
+                        Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE); type = "*/*"
+                        }, 7102)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK) return
+        when (requestCode) {
+            7101, 7102 -> {
+                val photo = requestCode == 7101
+                val raw = if (photo) data?.getStringExtra("photo_uri") else data?.data?.toString()
+                val uri = raw?.takeIf { it.isNotBlank() }?.let { android.net.Uri.parse(it) } ?: return
+                var bytes = contentResolver.openInputStream(uri)?.use { stream -> stream.readBytes() } ?: return
+                if (bytes.size > 2_000_000) {
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (bitmap != null) {
+                        var scale = 0.7f
+                        while (scale >= 0.25f) {
+                            val scaled = Bitmap.createScaledBitmap(bitmap,
+                                (bitmap.width * scale).toInt(), (bitmap.height * scale).toInt(), true)
+                            val buffer = java.io.ByteArrayOutputStream()
+                            scaled.compress(Bitmap.CompressFormat.JPEG, 85, buffer)
+                            if (buffer.size() <= 2_000_000) { bytes = buffer.toByteArray(); break }
+                            buffer.reset(); scale -= 0.15f
+                        }
+                        bitmap.recycle()
+                    }
+                }
+                if (bytes.size > 2_000_000) {
+                    screen.showNotice("Attachment stays over the 2 MB Muse limit. Pick a smaller file.")
+                    return
+                }
+                val name = if (photo) System.currentTimeMillis().toString() + ".jpg" else "attachment"
+                val mime = if (photo) "image/jpeg" else (contentResolver.getType(uri)
+                    ?: "application/octet-stream")
+                addToPendingItems(bytes, mime, name)
+            }
+        }
+    }
+
+    private fun addToPendingItems(bytes: ByteArray, mime: String, suggestedName: String? = null) {
+        val name = suggestedName ?: "attachment"
+        val item = JSONObject().put("type", "file").put("mime_type", mime).put("filename", name)
+            .put("data_base64", java.util.Base64.getEncoder().encodeToString(bytes))
+        synchronized(pendingItems) { pendingItems.add(item); pendingItemsLabel = "photo" }
+        screen.showAttachHint()
+        updateStatus("ATTACHMENT READY")
     }
 
     private fun enterFullscreen() {
@@ -120,8 +239,11 @@ class MainActivity : Activity() {
         if (hasFocus) enterFullscreen()
     }
 
-    private fun updateStatus(value: String) {
-        screen.setState(value)
+    private fun updateStatus(value: String, force: Boolean = false) {
+        screen.setState(if (force) value else when {
+            currentSession != null && value in setOf("READY", "REPLY RECEIVED") -> "SIDE CHAT ACTIVE"
+            else -> value
+        })
         screen.setHistoryState(hasConversation, historyLoaded && !recording && !sending)
     }
 
@@ -140,7 +262,7 @@ class MainActivity : Activity() {
                 turn++
                 activeTurn = null
                 history.clear()
-                historyStore.save(history)
+                saveVisibleHistory()
                 screen.message.text = ""
                 screen.showIdle()
                 screen.setHistoryState(false, false)
@@ -175,7 +297,7 @@ class MainActivity : Activity() {
     private fun receiveReply(id: String, text: String, done: Boolean) {
         val current = activeTurn ?: return
         current.replies[id] = if (done && text.isNotEmpty()) text else current.replies.getOrDefault(id, "") + text
-        historyStore.save(history)
+        saveVisibleHistory()
         renderConversation()
         if (done) {
             sending = false; turnTimeout?.cancel(); updateStatus("REPLY RECEIVED")
@@ -188,7 +310,7 @@ class MainActivity : Activity() {
         current.user = text
         transcriptPending = false
         transcriptFetch?.cancel()
-        historyStore.save(history)
+        saveVisibleHistory()
         renderConversation()
     }
 
@@ -256,6 +378,14 @@ class MainActivity : Activity() {
             { text -> runOnUiThread {
                 if (connection !== current || recording) return@runOnUiThread
                 receiveTranscript(text)
+            } },
+            { value -> runOnUiThread {
+                if (connection !== current || recording) return@runOnUiThread
+                if (value.isNotBlank()) updateStatus(value.uppercase()) else updateStatus("READY")
+            } },
+            { sessionId -> runOnUiThread {
+                sideChats.observe(sessionId, currentSession)
+                screen.setUnread(sideChats.totalUnread())
             } })
         connection = current
         scope.launch {
@@ -265,9 +395,29 @@ class MainActivity : Activity() {
                 connected = true
                 updateStatus("READY")
                 if (hasConversation) renderConversation() else screen.showIdle()
+                fetchServerHistoryOnce(current)
             } catch (_: Exception) {
                 if (connection === current) { connection = null; connected = false; updateStatus("CONNECTION FAILED"); screen.showNotice("Couldn't connect to Muse.\n\nHold the empty background to check Wi-Fi or reconnect.") }
             }
+        }
+    }
+
+    /** Main-chat history from Meta Muse replaces the local display list when it shows more turns. */
+    private fun fetchServerHistoryOnce(current: MuseConnection) {
+        if (serverHistoryFetched || currentSession != null) return
+        serverHistoryFetched = true
+        scope.launch {
+            try {
+                val turns = withContext(Dispatchers.IO) { current.fetchRemoteHistory() }
+                if (connection !== current || currentSession != null || recording) return@launch
+                val mapped = turns.map { (user, reply) ->
+                    ConversationTurn(user.takeIf { it.isNotBlank() }, linkedMapOf("assistant" to reply))
+                }.ifEmpty { return@launch }
+                if (mapped.size > history.size) {
+                    history.clear(); history.addAll(mapped); saveVisibleHistory()
+                    renderConversation(); screen.jumpToLatest()
+                }
+            } catch (_: Exception) { /* History 403s or timeouts keep the local display. */ }
         }
     }
 
@@ -360,7 +510,11 @@ class MainActivity : Activity() {
         val thisTurn = turn
         scope.launch {
             try {
-                val userId = withContext(Dispatchers.IO) { checkNotNull(current).sendVoice(wav) }
+                val userId = withContext(Dispatchers.IO) {
+                    val items = synchronized(pendingItems) { pendingItems.toList() }
+                    checkNotNull(current).sendVoice(wav, currentSession, items)
+                }
+                synchronized(pendingItems) { pendingItems.clear(); pendingItemsLabel = "" }
                 if (connection === current && turn == thisTurn && transcriptPending) fetchTranscript(current!!, userId, thisTurn)
             }
             catch (_: Exception) {
@@ -375,7 +529,7 @@ class MainActivity : Activity() {
     private fun startVoiceTurn() {
         activeTurn = ConversationTurn().also { history.add(it) }
         sending = true; transcriptPending = true
-        historyStore.save(history)
+        saveVisibleHistory()
         screen.jumpToLatest()
         renderConversation(); updateStatus("SENDING VOICE NOTE")
     }

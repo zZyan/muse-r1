@@ -50,6 +50,11 @@ at commit `7e7123e`), gadgets.muse.ai docs, and live device testing.
 | Unpair events | `link.unpaired`, `node.unpaired` | ❌ absent | Stage 0 (detect) |
 | Animated avatar | ESP32 pixel renderer (Jollybot excluded from license) | ⚠️ static PNG + canvas overlays | Stage 5 |
 
+## Protocol-verified limits (live probes)
+
+- `/api/voice/dictation` (streamed 24 kHz PCM, NDJSON partials) is **reachable only from account-app auth** — three probe shapes (POST/GET/GET-fallback) never emit transcript lines through the gadget's Noise session; live hold-streaming confirmed zero lines. Pre-send transcription via gadget = impossible; the app keeps hold→send→live-transcript (auto-send) as the voice flow.
+- No conversation-list endpoint exists (probed `/chat/threads|conversations|sessions|list` — all fail). Side-chat discovery = events + the official app's local thread DB via root (`su -mm`) + created_at positional title matching vs the official UI list.
+
 ## Device-specific facts (validated on-device)
 
 - Camera: one MTK hi846 device, `Facing=Back, Orientation=90`, enumerated only
